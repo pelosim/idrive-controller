@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iDrive Button Mapper</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+
+  :root {
+    --bg: #0d0d0d;
+    --surface: #161616;
+    --surface2: #1f1f1f;
+    --border: #2a2a2a;
+    --accent: #f4d03f;
+    --accent2: #e67e22;
+    --green: #2ecc71;
+    --red: #e74c3c;
+    --blue: #3498db;
+    --text: #e0e0e0;
+    --dim: #555;
+    --mono: 'IBM Plex Mono', monospace;
+    --sans: 'IBM Plex Sans', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--accent);
+    letter-spacing: 2px;
+  }
+
+  .logo span { color: var(--dim); }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 1px;
+  }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--dim);
+  }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.err { background: var(--red); }
+
+  .btn {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 1px;
+    padding: 7px 18px;
+    border: 1px solid currentColor;
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.12s;
+    text-transform: uppercase;
+  }
+  .btn-yellow { color: var(--accent); }
+  .btn-yellow:hover { background: var(--accent); color: var(--bg); }
+  .btn-red { color: var(--red); }
+  .btn-red:hover { background: var(--red); color: white; }
+  .btn-green { color: var(--green); }
+  .btn-green:hover { background: var(--green); color: var(--bg); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .btn:disabled:hover { background: transparent; color: currentColor; }
+
+  .main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 0;
+    overflow: hidden;
+    height: calc(100vh - 53px);
+  }
+
+  /* LEFT PANEL - raw stream */
+  .left {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .panel-bar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .panel-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+
+  .stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .stream::-webkit-scrollbar { width: 3px; }
+  .stream::-webkit-scrollbar-track { background: var(--bg); }
+  .stream::-webkit-scrollbar-thumb { background: var(--dim); }
+
+  .stream-row {
+    padding: 3px 16px;
+    display: grid;
+    grid-template-columns: 55px 55px 1fr;
+    gap: 10px;
+    border-left: 2px solid transparent;
+    transition: background 0.1s;
+  }
+  .stream-row:hover { background: #1a1a1a; }
+  .stream-row.highlight {
+    border-left-color: var(--accent);
+    background: rgba(244,208,63,0.05);
+    animation: rowflash 0.5s ease-out;
+  }
+  @keyframes rowflash {
+    0% { background: rgba(244,208,63,0.2); }
+    100% { background: rgba(244,208,63,0.05); }
+  }
+
+  .row-ts { color: var(--dim); font-size: 10px; align-self: center; }
+  .row-id { color: var(--accent); font-weight: 600; align-self: center; }
+  .row-data { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+
+  .byte-cell {
+    padding: 1px 3px;
+    font-size: 11px;
+    border-radius: 2px;
+    min-width: 22px;
+    text-align: center;
+  }
+  .byte-normal { color: var(--dim); }
+  .byte-changed { color: var(--accent2); background: rgba(230,126,34,0.15); }
+  .byte-active { color: var(--accent); background: rgba(244,208,63,0.15); }
+
+  .stream-empty {
+    padding: 40px 20px;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 2px;
+    line-height: 2;
+  }
+
+  /* RIGHT PANEL - button map */
+  .right {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .capture-zone {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .capture-target {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 2px;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+  }
+
+  .capture-name-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 8px 10px;
+    outline: none;
+    margin-bottom: 8px;
+    letter-spacing: 1px;
+  }
+  .capture-name-input:focus { border-color: var(--accent); }
+  .capture-name-input::placeholder { color: var(--dim); }
+
+  .capture-btns {
+    display: flex;
+    gap: 8px;
+  }
+
+  .capturing-indicator {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent2);
+    letter-spacing: 1px;
+    margin-top: 8px;
+  }
+  .capturing-indicator.active { display: flex; }
+  .cap-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent2); animation: blink 0.5s infinite; }
+  @keyframes blink { 0%,100%{opacity:1}50%{opacity:0} }
+
+  .map-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .map-list::-webkit-scrollbar { width: 3px; }
+  .map-list::-webkit-scrollbar-track { background: var(--bg); }
+  .map-list::-webkit-scrollbar-thumb { background: var(--dim); }
+
+  .map-item {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 10px 12px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
+    align-items: start;
+  }
+
+  .map-item-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+  }
+
+  .map-item-data {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    line-height: 1.8;
+  }
+
+  .map-item-data span { color: var(--text); }
+
+  .map-del {
+    background: none;
+    border: none;
+    color: var(--dim);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 4px;
+    align-self: start;
+  }
+  .map-del:hover { color: var(--red); }
+
+  .map-empty {
+    padding: 30px 16px;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 2px;
+    line-height: 2.2;
+    text-transform: uppercase;
+  }
+
+  /* Export bar */
+  .export-bar {
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  /* Stats bar */
+  .stats-bar {
+    padding: 4px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface2);
+    display: flex;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+
+  .stat {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 1px;
+  }
+  .stat span { color: var(--green); }
+
+  /* Raw log modal */
+  .modal-bg {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 50;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-bg.open { display: flex; }
+
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    width: 90vw;
+    max-width: 700px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .modal-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    letter-spacing: 2px;
+  }
+
+  .modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0;
+  }
+
+  .modal-body textarea {
+    width: 100%;
+    height: 100%;
+    min-height: 300px;
+    background: var(--bg);
+    color: var(--green);
+    font-family: var(--mono);
+    font-size: 12px;
+    border: none;
+    padding: 16px;
+    outline: none;
+    resize: none;
+    line-height: 1.8;
+  }
+
+  .modal-footer {
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">iDrive <span>//</span> Button Mapper</div>
+  <div class="header-right">
+    <div class="indicator">
+      <div class="dot" id="dot"></div>
+      <span id="statusTxt">DISCONNECTED</span>
+    </div>
+    <button class="btn btn-yellow" id="connectBtn" onclick="toggleConnect()">Connect</button>
+  </div>
+</header>
+
+<div class="main">
+
+  <!-- LEFT: Raw stream -->
+  <div class="left">
+    <div class="panel-bar">
+      <span class="panel-label">Raw Frames — 0x25B only</span>
+      <button class="btn btn-red" style="padding:4px 10px;font-size:10px" onclick="clearStream()">Clear</button>
+    </div>
+    <div class="stats-bar">
+      <div class="stat">frames: <span id="frameCount">0</span></div>
+      <div class="stat">last ID: <span id="lastId">—</span></div>
+      <div class="stat">b1: <span id="lastB1">—</span></div>
+      <div class="stat">b3: <span id="lastB3">—</span></div>
+      <div class="stat">b4: <span id="lastB4">—</span></div>
+    </div>
+    <div class="stream" id="stream">
+      <div class="stream-empty" id="streamEmpty">
+        Connect ESP32 via USB<br>
+        Arduino IDE must be closed<br>
+        Requires Chrome browser
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Button map -->
+  <div class="right">
+    <div class="panel-bar">
+      <span class="panel-label">Button Map</span>
+      <span class="panel-label" id="mapCount" style="color:var(--accent)">0 mapped</span>
+    </div>
+
+    <div class="capture-zone">
+      <div class="capture-target">Button name to capture:</div>
+      <input class="capture-name-input" id="captureName" placeholder="e.g. MENU" />
+      <div class="capture-btns">
+        <button class="btn btn-yellow" id="capBtn" onclick="startCapture()" style="flex:1">▶ Capture</button>
+        <button class="btn btn-red" id="stopBtn" onclick="stopCapture()" style="flex:1" disabled>■ Stop</button>
+      </div>
+      <div class="capturing-indicator" id="capIndicator">
+        <div class="cap-dot"></div>
+        <span>CAPTURING — press the button now</span>
+      </div>
+    </div>
+
+    <div class="map-list" id="mapList">
+      <div class="map-empty">
+        Type a button name above<br>
+        click Capture<br>
+        press the iDrive button<br>
+        click Stop
+      </div>
+    </div>
+
+    <div class="export-bar">
+      <button class="btn btn-green" onclick="showExport()" style="flex:1">Export Code</button>
+      <button class="btn btn-red" onclick="clearMap()" style="padding:7px 12px">✕</button>
+    </div>
+  </div>
+</div>
+
+<!-- Export modal -->
+<div class="modal-bg" id="modalBg" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <span>GENERATED CODE</span>
+      <button class="btn btn-yellow" style="padding:4px 10px;font-size:10px" onclick="copyCode()">Copy</button>
+    </div>
+    <div class="modal-body">
+      <textarea id="codeOutput" readonly></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-red" onclick="closeModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── State ──
+  let port = null, reader = null;
+  let buffer = '';
+  let frameCount = 0;
+  let lastFrameData = {};
+  let capturing = false;
+  let captureFrames = [];
+  let buttonMap = [];
+
+  // ── Serial ──
+  async function toggleConnect() {
+    port ? await disconnect() : await connect();
+  }
+
+  async function connect() {
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      setStatus('on', 'CONNECTED');
+      document.getElementById('connectBtn').textContent = 'Disconnect';
+      document.getElementById('streamEmpty').style.display = 'none';
+      readLoop();
+    } catch(e) {
+      setStatus('err', 'ERROR');
+      console.error(e);
+    }
+  }
+
+  async function disconnect() {
+    try {
+      if (reader) { await reader.cancel(); reader = null; }
+      if (port) { await port.close(); port = null; }
+    } catch(e) {}
+    setStatus('', 'DISCONNECTED');
+    document.getElementById('connectBtn').textContent = 'Connect';
+  }
+
+  async function readLoop() {
+    try {
+      const decoder = new TextDecoderStream();
+      const pipeDone = port.readable.pipeTo(decoder.writable);
+      reader = decoder.readable.getReader();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        processBuffer();
+      }
+    } catch(e) {
+      if (port) setStatus('err', 'READ ERR');
+    }
+  }
+
+  function processBuffer() {
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    lines.forEach(line => {
+      line = line.trim();
+      if (line.startsWith('ID:')) parseFrame(line);
+    });
+  }
+
+  function parseFrame(line) {
+    const idMatch  = line.match(/ID:\s*(0x[0-9A-Fa-f]+)/i);
+    const datMatch = line.match(/Data:\s*([0-9A-Fa-f\s]+)/i);
+    if (!idMatch || !datMatch) return;
+
+    const id    = idMatch[1].toUpperCase();
+    const bytes = datMatch[1].trim().split(/\s+/).map(b => b.toUpperCase().padStart(2,'0'));
+
+    // Track changes
+    const prevStr = lastFrameData[id] || '';
+    const currStr = bytes.join(' ');
+    const changedIdxs = [];
+    if (prevStr) {
+      const prev = prevStr.split(' ');
+      bytes.forEach((b,i) => { if (b !== prev[i]) changedIdxs.push(i); });
+    }
+    lastFrameData[id] = currStr;
+
+    frameCount++;
+    document.getElementById('frameCount').textContent = frameCount;
+    document.getElementById('lastId').textContent = id;
+
+    // Only render 0x25B in stream
+    if (id === '0X25B' || id === '0x25B' || id.replace('0X','0x') === '0x25B') {
+      // Update stats
+      if (bytes[1]) document.getElementById('lastB1').textContent = '0x'+bytes[1];
+      if (bytes[3]) document.getElementById('lastB3').textContent = '0x'+bytes[3];
+      if (bytes[4]) document.getElementById('lastB4').textContent = '0x'+bytes[4];
+
+      renderRow(id, bytes, changedIdxs);
+
+      // Capture
+      if (capturing && bytes[3] === '01') {
+        captureFrames.push({ bytes: [...bytes], ts: Date.now() });
+      }
+    }
+  }
+
+  function renderRow(id, bytes, changedIdxs) {
+    const stream = document.getElementById('stream');
+    const row = document.createElement('div');
+    const isChanged = changedIdxs.length > 0;
+    row.className = 'stream-row' + (isChanged ? ' highlight' : '');
+
+    const now = new Date();
+    const ts = now.toLocaleTimeString('en-US',{hour12:false}) + '.' + String(now.getMilliseconds()).padStart(3,'0');
+
+    const bytesHtml = bytes.map((b,i) => {
+      let cls = 'byte-normal';
+      if (changedIdxs.includes(i)) cls = 'byte-changed';
+      if (i === 1 || i === 3) cls = changedIdxs.includes(i) ? 'byte-active' : cls;
+      return `<span class="byte-cell ${cls}">${b}</span>`;
+    }).join('');
+
+    row.innerHTML = `
+      <span class="row-ts">${ts.slice(3)}</span>
+      <span class="row-id">${id}</span>
+      <div class="row-data">${bytesHtml}</div>
+    `;
+    stream.appendChild(row);
+
+    // Cap at 300 rows
+    while (stream.children.length > 300) stream.removeChild(stream.firstChild);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  // ── Capture ──
+  function startCapture() {
+    const name = document.getElementById('captureName').value.trim();
+    if (!name) { document.getElementById('captureName').focus(); return; }
+    capturing = true;
+    captureFrames = [];
+    document.getElementById('capBtn').disabled = true;
+    document.getElementById('stopBtn').disabled = false;
+    document.getElementById('capIndicator').classList.add('active');
+  }
+
+  function stopCapture() {
+    capturing = false;
+    document.getElementById('capBtn').disabled = false;
+    document.getElementById('stopBtn').disabled = true;
+    document.getElementById('capIndicator').classList.remove('active');
+
+    const name = document.getElementById('captureName').value.trim();
+    if (!name || captureFrames.length === 0) return;
+
+    // Find the most common b1 value from press frames (b3=01)
+    const pressFrames = captureFrames.filter(f => f.bytes[3] === '01');
+    if (pressFrames.length === 0) {
+      alert('No button press detected — try again');
+      return;
+    }
+
+    // Pick first press frame as representative
+    const rep = pressFrames[0];
+    const b1  = rep.bytes[1];
+    const b2  = rep.bytes[2];
+    const b4  = rep.bytes[4];
+
+    // Check for duplicate
+    const exists = buttonMap.find(m => m.b1 === b1);
+    if (exists) {
+      if (!confirm(`b1=0x${b1} already mapped to "${exists.name}". Override?`)) return;
+      buttonMap = buttonMap.filter(m => m.b1 !== b1);
+    }
+
+    buttonMap.push({ name, b1, b2, b4, frames: captureFrames.length });
+    document.getElementById('captureName').value = '';
+    renderMap();
+  }
+
+  // ── Map render ──
+  function renderMap() {
+    const list = document.getElementById('mapList');
+    list.innerHTML = '';
+    document.getElementById('mapCount').textContent = buttonMap.length + ' mapped';
+
+    if (buttonMap.length === 0) {
+      list.innerHTML = '<div class="map-empty">Type a button name above<br>click Capture<br>press the iDrive button<br>click Stop</div>';
+      return;
+    }
+
+    buttonMap.forEach((item, idx) => {
+      const el = document.createElement('div');
+      el.className = 'map-item';
+      el.innerHTML = `
+        <div>
+          <div class="map-item-name">${item.name}</div>
+          <div class="map-item-data">
+            b1: <span>0x${item.b1}</span>&nbsp;&nbsp;
+            b2: <span>0x${item.b2}</span>&nbsp;&nbsp;
+            b4: <span>0x${item.b4}</span>
+            &nbsp;&nbsp;(${item.frames} frames)
+          </div>
+        </div>
+        <button class="map-del" onclick="deleteMap(${idx})">✕</button>
+      `;
+      list.appendChild(el);
+    });
+  }
+
+  function deleteMap(idx) {
+    buttonMap.splice(idx, 1);
+    renderMap();
+  }
+
+  function clearMap() {
+    if (buttonMap.length && !confirm('Clear all mappings?')) return;
+    buttonMap = [];
+    renderMap();
+  }
+
+  // ── Export ──
+  function showExport() {
+    if (buttonMap.length === 0) { alert('No buttons mapped yet'); return; }
+
+    const enumLines = buttonMap.map(m =>
+      `  BTN_${m.name.toUpperCase().replace(/\s+/g,'_')},`
+    ).join('\n');
+
+    const structLines = buttonMap.map(m =>
+      `  { "BTN_${m.name.toUpperCase().replace(/\s+/g,'_')}", 0x${m.b1} },`
+    ).join('\n');
+
+    const caseLines = buttonMap.map(m =>
+      `    case 0x${m.b1}: Serial.println("${m.name}"); /* TODO: action */ break;`
+    ).join('\n');
+
+    const code = `// ═══════════════════════════════════════════════
+// iDrive Button Map — generated by iDrive Mapper
+// ═══════════════════════════════════════════════
+
+// Button enum
+enum iDriveButton {
+  BTN_NONE = 0,
+${enumLines}
+};
+
+// Button lookup table
+struct ButtonDef { const char* name; uint8_t b1; };
+ButtonDef buttonDefs[] = {
+${structLines}
+};
+
+// Decode b1 value to button name
+const char* getButtonName(uint8_t b1) {
+  for (auto& def : buttonDefs) {
+    if (def.b1 == b1) return def.name;
+  }
+  return "UNKNOWN";
+}
+
+// ── Add to handleFrame() ──────────────────────────
+// Replace or merge with your existing handleFrame()
+
+void handleFrame(twai_message_t& msg) {
+  if (msg.identifier != 0x25B) return;
+
+  uint8_t b1 = msg.data[1];
+  uint8_t b2 = msg.data[2];
+  uint8_t b3 = msg.data[3];
+
+  static uint8_t lastB1 = 0xFF;
+  static uint8_t lastB3 = 0x00;
+
+  // Button press — edge detect
+  if (b3 == 0x01 && lastB3 == 0x00 && b2 == 0x80) {
+    Serial.printf("PRESS: %s (b1=0x%02X)\\n", getButtonName(b1), b1);
+    switch (b1) {
+${caseLines}
+      default: break;
+    }
+  }
+
+  // Knob press
+  if (b3 == 0x01 && lastB3 == 0x00 && b2 == 0x7F) {
+    Serial.println("KNOB PRESS");
+    // TODO: knob press action
+  }
+
+  // Rotation
+  if (b2 == 0x80 && lastB1 != 0xFF) {
+    int8_t delta = (int8_t)(b1 - lastB1);
+    if (delta > 0)      Serial.printf("KNOB CW  %d\\n", delta);
+    else if (delta < 0) Serial.printf("KNOB CCW %d\\n", -delta);
+  }
+
+  if (b3 == 0x01) lastB1 = 0xFF;
+  else             lastB1 = b1;
+  lastB3 = b3;
+}
+`;
+
+    document.getElementById('codeOutput').value = code;
+    document.getElementById('modalBg').classList.add('open');
+  }
+
+  function copyCode() {
+    const ta = document.getElementById('codeOutput');
+    ta.select();
+    document.execCommand('copy');
+    const btn = event.target;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  }
+
+  function closeModal() {
+    document.getElementById('modalBg').classList.remove('open');
+  }
+
+  // ── Utilities ──
+  function clearStream() {
+    const s = document.getElementById('stream');
+    s.innerHTML = '';
+    frameCount = 0;
+    document.getElementById('frameCount').textContent = '0';
+  }
+
+  function setStatus(state, text) {
+    const dot = document.getElementById('dot');
+    dot.className = 'dot' + (state ? ' '+state : '');
+    document.getElementById('statusTxt').textContent = text;
+  }
+
+  // Enter key on name input starts capture
+  document.getElementById('captureName').addEventListener('keydown', e => {
+    if (e.key === 'Enter') startCapture();
+  });
+</script>
+</body>
+</html>

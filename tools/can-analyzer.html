@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iDrive CAN Analyzer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700&display=swap');
+
+  :root {
+    --bg: #0a0c0f;
+    --panel: #111318;
+    --border: #1e2430;
+    --accent: #00e5ff;
+    --accent2: #ff6b35;
+    --accent3: #7fff6b;
+    --text: #c8d0e0;
+    --dim: #4a5568;
+    --highlight: rgba(0,229,255,0.08);
+    --changed: rgba(255,107,53,0.15);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Barlow Condensed', sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Scanline overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+  }
+
+  .logo {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    color: var(--accent);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+
+  .logo span { color: var(--dim); }
+
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition: background 0.3s;
+  }
+  .status-dot.connected { background: var(--accent3); box-shadow: 0 0 8px var(--accent3); animation: pulse 2s infinite; }
+  .status-dot.error { background: var(--accent2); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .status-text {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 1px;
+  }
+
+  .btn {
+    font-family: 'Barlow Condensed', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 6px 16px;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn:hover { background: var(--accent); color: var(--bg); }
+  .btn:disabled { border-color: var(--dim); color: var(--dim); cursor: not-allowed; }
+  .btn:disabled:hover { background: transparent; color: var(--dim); }
+  .btn.danger { border-color: var(--accent2); color: var(--accent2); }
+  .btn.danger:hover { background: var(--accent2); color: var(--bg); }
+
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    grid-template-rows: 1fr 200px;
+    gap: 1px;
+    background: var(--border);
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .panel {
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .panel-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+
+  .panel-count {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+  }
+
+  /* Frame stream */
+  #frameStream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 0;
+    scroll-behavior: smooth;
+  }
+
+  #frameStream::-webkit-scrollbar { width: 4px; }
+  #frameStream::-webkit-scrollbar-track { background: var(--bg); }
+  #frameStream::-webkit-scrollbar-thumb { background: var(--dim); }
+
+  .frame-row {
+    display: grid;
+    grid-template-columns: 70px 60px 1fr auto;
+    align-items: center;
+    padding: 3px 14px;
+    gap: 12px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    border-left: 2px solid transparent;
+    transition: background 0.1s;
+  }
+
+  .frame-row:hover { background: var(--highlight); }
+
+  .frame-row.new-frame {
+    animation: flashRow 0.4s ease-out;
+  }
+
+  .frame-row.changed {
+    background: var(--changed);
+    border-left-color: var(--accent2);
+  }
+
+  @keyframes flashRow {
+    0% { background: rgba(0,229,255,0.2); }
+    100% { background: transparent; }
+  }
+
+  .frame-ts { color: var(--dim); font-size: 11px; }
+  .frame-id { color: var(--accent); font-weight: bold; }
+
+  .frame-data { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  .byte {
+    padding: 1px 4px;
+    border-radius: 2px;
+    transition: all 0.3s;
+  }
+  .byte.changed-byte {
+    color: var(--accent2);
+    background: rgba(255,107,53,0.2);
+  }
+
+  .frame-delta {
+    font-size: 10px;
+    color: var(--accent3);
+    letter-spacing: 1px;
+  }
+
+  /* Captured buttons panel */
+  #capturePanel {
+    grid-row: 1 / 3;
+    border-left: 1px solid var(--border);
+  }
+
+  .capture-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .capture-list::-webkit-scrollbar { width: 4px; }
+  .capture-list::-webkit-scrollbar-track { background: var(--bg); }
+  .capture-list::-webkit-scrollbar-thumb { background: var(--dim); }
+
+  .capture-item {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+    position: relative;
+  }
+
+  .capture-item:hover { border-color: var(--accent); }
+  .capture-item.selected { border-color: var(--accent); background: var(--highlight); }
+
+  .capture-label {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--text);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .capture-label input {
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-family: 'Barlow Condensed', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    width: 160px;
+    outline: none;
+  }
+  .capture-label input:focus { border-bottom: 1px solid var(--accent); }
+
+  .capture-frames {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+    line-height: 1.6;
+  }
+
+  .capture-del {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    background: none;
+    border: none;
+    color: var(--dim);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px;
+  }
+  .capture-del:hover { color: var(--accent2); }
+
+  .capture-btn-row {
+    display: flex;
+    gap: 6px;
+    padding: 8px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  /* Diff panel */
+  #diffPanel {
+    grid-column: 1;
+    border-top: 1px solid var(--border);
+  }
+
+  .diff-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 14px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+  }
+
+  .diff-row {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    padding: 2px 0;
+  }
+
+  .diff-id { color: var(--accent); width: 60px; }
+  .diff-label { color: var(--dim); width: 120px; font-size: 10px; }
+  .diff-bytes { display: flex; gap: 6px; }
+  .diff-byte-same { color: var(--dim); }
+  .diff-byte-diff { color: var(--accent2); font-weight: bold; }
+
+  .empty-state {
+    color: var(--dim);
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 20px;
+    text-align: center;
+  }
+
+  /* Controls bar */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .filter-input {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 8px;
+    width: 100px;
+    outline: none;
+    letter-spacing: 1px;
+  }
+  .filter-input:focus { border-color: var(--accent); }
+  .filter-input::placeholder { color: var(--dim); }
+
+  .toggle-btn {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all 0.15s;
+  }
+  .toggle-btn.active { border-color: var(--accent3); color: var(--accent3); }
+
+  .rate-display {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: var(--accent3);
+    margin-left: auto;
+    letter-spacing: 1px;
+  }
+
+  /* Capture indicator */
+  .capturing-badge {
+    display: none;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--accent2);
+    letter-spacing: 2px;
+    animation: blink 0.5s infinite;
+  }
+  .capturing-badge.active { display: inline; }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">iDrive <span>//</span> CAN Analyzer</div>
+  <div class="status-row">
+    <span class="capturing-badge" id="capBadge">● CAPTURING</span>
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">DISCONNECTED</span>
+    <button class="btn" id="connectBtn" onclick="toggleConnect()">Connect</button>
+  </div>
+</header>
+
+<div class="main">
+
+  <!-- Frame Stream -->
+  <div class="panel" id="streamPanel">
+    <div class="panel-header">
+      <span class="panel-title">Frame Stream</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="panel-count" id="frameCount">0 frames</span>
+        <button class="btn danger" style="padding:3px 10px;font-size:11px" onclick="clearStream()">Clear</button>
+      </div>
+    </div>
+    <div class="controls">
+      <input class="filter-input" id="filterInput" placeholder="Filter ID..." oninput="applyFilter()">
+      <button class="toggle-btn" id="scrollBtn" onclick="toggleScroll()" title="Auto-scroll">SCROLL</button>
+      <button class="toggle-btn" id="changedBtn" onclick="toggleChangedOnly()">CHANGED</button>
+      <button class="toggle-btn" id="pauseBtn" onclick="togglePause()">PAUSE</button>
+      <span class="rate-display" id="rateDisplay">0 fps</span>
+    </div>
+    <div id="frameStream">
+      <div class="empty-state" id="emptyState">Connect to ESP32 and press iDrive buttons</div>
+    </div>
+  </div>
+
+  <!-- Capture Panel -->
+  <div class="panel" id="capturePanel">
+    <div class="panel-header">
+      <span class="panel-title">Captured Inputs</span>
+      <span class="panel-count" id="captureCount">0</span>
+    </div>
+    <div class="capture-list" id="captureList">
+      <div class="empty-state">Press CAPTURE then interact with iDrive</div>
+    </div>
+    <div class="capture-btn-row">
+      <button class="btn" id="captureBtn" onclick="startCapture()" style="flex:1">Capture</button>
+      <button class="btn" onclick="compareSelected()" style="flex:1">Compare</button>
+      <button class="btn danger" onclick="clearCaptures()" style="padding:6px 10px">✕</button>
+    </div>
+  </div>
+
+  <!-- Diff Panel -->
+  <div class="panel" id="diffPanel">
+    <div class="panel-header">
+      <span class="panel-title">Diff / Compare</span>
+      <span class="panel-count" id="diffHint">Select 2 captures to compare</span>
+    </div>
+    <div class="diff-content" id="diffContent">
+      <div class="empty-state">Capture two inputs then click Compare</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let port = null;
+  let reader = null;
+  let buffer = '';
+  let frames = [];
+  let lastFrameData = {};
+  let autoScroll = true;
+  let showChangedOnly = false;
+  let paused = false;
+  let captures = [];
+  let capturing = false;
+  let captureBuffer = {};
+  let selectedCaptures = [];
+  let filterText = '';
+  let frameCounter = 0;
+  let fpsCounter = 0;
+  let lastFpsTime = Date.now();
+  let totalFrames = 0;
+
+  // FPS counter
+  setInterval(() => {
+    const now = Date.now();
+    const elapsed = (now - lastFpsTime) / 1000;
+    const fps = Math.round(fpsCounter / elapsed);
+    document.getElementById('rateDisplay').textContent = fps + ' fps';
+    fpsCounter = 0;
+    lastFpsTime = now;
+  }, 1000);
+
+  async function toggleConnect() {
+    if (port) {
+      await disconnect();
+    } else {
+      await connect();
+    }
+  }
+
+  async function connect() {
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+
+      setStatus('connected', 'CONNECTED');
+      document.getElementById('connectBtn').textContent = 'Disconnect';
+      document.getElementById('emptyState').style.display = 'none';
+
+      readLoop();
+    } catch (e) {
+      setStatus('error', 'ERROR: ' + e.message);
+    }
+  }
+
+  async function disconnect() {
+    if (reader) { await reader.cancel(); reader = null; }
+    if (port) { await port.close(); port = null; }
+    setStatus('', 'DISCONNECTED');
+    document.getElementById('connectBtn').textContent = 'Connect';
+  }
+
+  async function readLoop() {
+    const decoder = new TextDecoderStream();
+    port.readable.pipeTo(decoder.writable);
+    reader = decoder.readable.getReader();
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        processBuffer();
+      }
+    } catch (e) {
+      if (port) setStatus('error', 'READ ERROR');
+    }
+  }
+
+  function processBuffer() {
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    lines.forEach(line => {
+      line = line.trim();
+      if (line.startsWith('ID:')) {
+        parseFrame(line);
+      }
+    });
+  }
+
+  function parseFrame(line) {
+    // Format: ID: 0x25B  Data: 00 FF 7F 01 00 00 C0 F8
+    const idMatch = line.match(/ID:\s*(0x[0-9A-Fa-f]+)/);
+    const dataMatch = line.match(/Data:\s*([0-9A-Fa-f\s]+)/);
+    if (!idMatch || !dataMatch) return;
+
+    const id = idMatch[1].toUpperCase();
+    const bytes = dataMatch[1].trim().split(/\s+/).map(b => b.toUpperCase().padStart(2,'0'));
+    const ts = Date.now();
+
+    // Check for changes
+    const prevKey = lastFrameData[id];
+    const changed = prevKey && prevKey !== bytes.join(' ');
+    const changedBytes = [];
+    if (prevKey) {
+      const prev = prevKey.split(' ');
+      bytes.forEach((b, i) => { if (b !== prev[i]) changedBytes.push(i); });
+    }
+    lastFrameData[id] = bytes.join(' ');
+
+    const frame = { id, bytes, ts, changed, changedBytes };
+    fpsCounter++;
+    totalFrames++;
+
+    // Add to capture if capturing
+    if (capturing) {
+      if (!captureBuffer[id] || changed) {
+        captureBuffer[id] = { bytes: [...bytes], changedBytes: [...changedBytes] };
+      }
+    }
+
+    if (!paused) {
+      renderFrame(frame);
+    }
+
+    document.getElementById('frameCount').textContent = totalFrames + ' frames';
+  }
+
+  function renderFrame(frame) {
+    if (filterText && !frame.id.includes(filterText.toUpperCase())) return;
+    if (showChangedOnly && !frame.changed) return;
+
+    const stream = document.getElementById('frameStream');
+    const row = document.createElement('div');
+    row.className = 'frame-row new-frame' + (frame.changed ? ' changed' : '');
+
+    const ts = new Date(frame.ts);
+    const tsStr = ts.toLocaleTimeString('en-US', {hour12:false}) + '.' + 
+                  String(ts.getMilliseconds()).padStart(3,'0');
+
+    const bytesHtml = frame.bytes.map((b, i) => 
+      `<span class="byte${frame.changedBytes.includes(i) ? ' changed-byte' : ''}">${b}</span>`
+    ).join('');
+
+    const delta = frame.changedBytes.length > 0 
+      ? `Δ[${frame.changedBytes.join(',')}]` : '';
+
+    row.innerHTML = `
+      <span class="frame-ts">${tsStr.slice(0,12)}</span>
+      <span class="frame-id">${frame.id}</span>
+      <div class="frame-data">${bytesHtml}</div>
+      <span class="frame-delta">${delta}</span>
+    `;
+
+    stream.appendChild(row);
+
+    // Limit DOM nodes
+    while (stream.children.length > 500) {
+      stream.removeChild(stream.firstChild);
+    }
+
+    if (autoScroll) {
+      stream.scrollTop = stream.scrollHeight;
+    }
+  }
+
+  function startCapture() {
+    if (capturing) {
+      // Stop capture
+      capturing = false;
+      document.getElementById('captureBtn').textContent = 'Capture';
+      document.getElementById('capBadge').classList.remove('active');
+
+      if (Object.keys(captureBuffer).length > 0) {
+        const capture = {
+          id: captures.length,
+          label: 'Input ' + (captures.length + 1),
+          frames: { ...captureBuffer },
+          selected: false
+        };
+        captures.push(capture);
+        renderCaptures();
+      }
+      captureBuffer = {};
+    } else {
+      // Start capture
+      capturing = true;
+      captureBuffer = {};
+      document.getElementById('captureBtn').textContent = 'Stop';
+      document.getElementById('capBadge').classList.add('active');
+    }
+  }
+
+  function renderCaptures() {
+    const list = document.getElementById('captureList');
+    list.innerHTML = '';
+    document.getElementById('captureCount').textContent = captures.length;
+
+    if (captures.length === 0) {
+      list.innerHTML = '<div class="empty-state">Press CAPTURE then interact with iDrive</div>';
+      return;
+    }
+
+    captures.forEach((cap, idx) => {
+      const item = document.createElement('div');
+      item.className = 'capture-item' + (cap.selected ? ' selected' : '');
+      item.onclick = (e) => { if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON') toggleSelect(idx); };
+
+      const frameLines = Object.entries(cap.frames)
+        .map(([id, f]) => `${id}: ${f.bytes.join(' ')}`)
+        .join('\n');
+
+      item.innerHTML = `
+        <div class="capture-label">
+          <input value="${cap.label}" onchange="renameCapture(${idx}, this.value)" onclick="event.stopPropagation()">
+          <span style="font-size:10px;color:var(--dim)">${Object.keys(cap.frames).length} IDs</span>
+        </div>
+        <div class="capture-frames">${frameLines}</div>
+        <button class="capture-del" onclick="deleteCapture(${idx});event.stopPropagation()">✕</button>
+      `;
+      list.appendChild(item);
+    });
+  }
+
+  function toggleSelect(idx) {
+    captures[idx].selected = !captures[idx].selected;
+    renderCaptures();
+  }
+
+  function renameCapture(idx, name) {
+    captures[idx].label = name;
+  }
+
+  function deleteCapture(idx) {
+    captures.splice(idx, 1);
+    renderCaptures();
+  }
+
+  function clearCaptures() {
+    captures = [];
+    renderCaptures();
+    document.getElementById('diffContent').innerHTML = '<div class="empty-state">Capture two inputs then click Compare</div>';
+  }
+
+  function compareSelected() {
+    const selected = captures.filter(c => c.selected);
+    if (selected.length < 2) {
+      document.getElementById('diffHint').textContent = 'Select 2 captures to compare';
+      document.getElementById('diffContent').innerHTML = '<div class="empty-state">Click two captures to select them, then Compare</div>';
+      return;
+    }
+
+    const a = selected[0];
+    const b = selected[1];
+    document.getElementById('diffHint').textContent = `${a.label} vs ${b.label}`;
+
+    // Get all IDs from both
+    const allIds = new Set([...Object.keys(a.frames), ...Object.keys(b.frames)]);
+    const content = document.getElementById('diffContent');
+    content.innerHTML = '';
+
+    allIds.forEach(id => {
+      const fa = a.frames[id];
+      const fb = b.frames[id];
+
+      const row = document.createElement('div');
+      row.className = 'diff-row';
+
+      if (!fa || !fb) {
+        // Only in one
+        const only = fa || fb;
+        const label = fa ? a.label : b.label;
+        row.innerHTML = `
+          <span class="diff-id">${id}</span>
+          <span class="diff-label" style="color:var(--accent2)">only in ${label}</span>
+          <div class="diff-bytes">${only.bytes.map(b => `<span class="diff-byte-diff">${b}</span>`).join('')}</div>
+        `;
+      } else {
+        const bytesHtml = fa.bytes.map((byteA, i) => {
+          const byteB = fb.bytes[i];
+          if (byteA !== byteB) {
+            return `<span class="diff-byte-diff" title="A:${byteA} B:${byteB}">${byteA}→${byteB}</span>`;
+          }
+          return `<span class="diff-byte-same">${byteA}</span>`;
+        }).join('');
+
+        const diffs = fa.bytes.filter((b,i) => b !== fb.bytes[i]).length;
+        if (diffs === 0) return; // skip identical
+
+        row.innerHTML = `
+          <span class="diff-id">${id}</span>
+          <span class="diff-label">${diffs} byte${diffs>1?'s':''} differ</span>
+          <div class="diff-bytes">${bytesHtml}</div>
+        `;
+      }
+
+      content.appendChild(row);
+    });
+
+    if (content.children.length === 0) {
+      content.innerHTML = '<div class="empty-state">No differences found between captures</div>';
+    }
+  }
+
+  function clearStream() {
+    document.getElementById('frameStream').innerHTML = '';
+    totalFrames = 0;
+    document.getElementById('frameCount').textContent = '0 frames';
+  }
+
+  function toggleScroll() {
+    autoScroll = !autoScroll;
+    document.getElementById('scrollBtn').classList.toggle('active', autoScroll);
+  }
+
+  function toggleChangedOnly() {
+    showChangedOnly = !showChangedOnly;
+    document.getElementById('changedBtn').classList.toggle('active', showChangedOnly);
+  }
+
+  function togglePause() {
+    paused = !paused;
+    document.getElementById('pauseBtn').classList.toggle('active', paused);
+  }
+
+  function applyFilter() {
+    filterText = document.getElementById('filterInput').value.trim();
+  }
+
+  function setStatus(state, text) {
+    const dot = document.getElementById('statusDot');
+    dot.className = 'status-dot' + (state ? ' ' + state : '');
+    document.getElementById('statusText').textContent = text;
+  }
+
+  // Init scroll button as active
+  document.getElementById('scrollBtn').classList.add('active');
+</script>
+</body>
+</html>
