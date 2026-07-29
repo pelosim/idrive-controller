@@ -72,12 +72,30 @@ Upload hangs at "Connecting..." → hold BOOT, tap RESET, release BOOT.
 - Never send `0x440` with byte1=`0xFF` — that is a sleep request.
 - Keep the "KNOWN ISSUES" and init-sequence tables in the README intact on regen.
 
+## Output path: IR is primary, SWC ladder is the fallback
+**The CP-71W has no SWC learn/study mode** (confirmed on the unit). Its resistive
+ladder is therefore a fixed, undocumented, per-radio map — the thing PAC sells
+programming for — so using it means first discovering the values by sweeping ~0–5 kΩ.
+
+The bundled IR remote sidesteps that entirely: volume, mute, and track buttons are
+physically on it, so the codes provably exist and capture is deterministic. Hence
+`ir_capture/ir_capture.ino` (IRremoteESP8266 2.9.0, verified to build on S3/core 3.3.10).
+
+The ladder stays behind `SWC_ENABLE` in case a sweep later finds a usable map.
+
+⚠️ When wiring IR *send* into the main sketch: a full NEC frame is ~67 ms of blocking
+carrier work. Run `IRsend` in a FreeRTOS task pinned to **core 0** (Arduino `loop()`
+runs on core 1) fed by a queue. Putting it inline in `loop()` would reintroduce the
+exact frame-dropping bug fixed in 1.1.0.
+
 ## Open next steps
-- Bench-test the ladder against the real CP-71W. First question: does it have an SWC
-  "study"/"learn" screen? If yes, values are arbitrary. If no, sweep to find them.
-- Tune `SWC_HOLD_MS`/`SWC_GAP_MS` down from 140/60. Current 200 ms cadence means a
-  10-detent spin takes ~2 s to play out. If the radio auto-repeats on a held button,
-  switch volume to assert-and-hold during sustained rotation instead of N presses.
+- Capture the remote codes with `ir_capture`, then wire IR send into the main sketch
+  as a core-0 task. Expect NEC; fall back to `sendRaw()` if it decodes as UNKNOWN.
+- Decide the IR emit method: direct injection at the head unit's IR receiver output
+  pin (preferred — hidden, no line of sight) vs an LED at the faceplate window.
+- If the ladder is ever revisited: sweep 0–5 kΩ to find the fixed map, then tune
+  `SWC_HOLD_MS`/`SWC_GAP_MS` down from 140/60 (current 200 ms cadence means a
+  10-detent spin takes ~2 s to play out).
 - Solve the bench auto-wake: capture `0x5E7`/`0x273` on the 2014 428i with canclaude
   `sniff`. F-series put the iDrive on K-CAN2 behind the ZGW, so tap a module
   connector, not the OBD port.

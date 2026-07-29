@@ -147,11 +147,19 @@ where the ESP32's ~30 Ω output-LOW impedance is a large error term — at 560 �
 it is under 6%. Adjacent values are separated by ≥1.4×, wider than any radio's
 detection window.
 
-If the CP-71W has an SWC **"study" / "learn"** screen, the exact values don't matter —
-teach it whatever the sketch outputs. If it expects a fixed factory ladder, sweep:
-hand-tie single resistors from the line to ground and watch what the radio does, then
-put the values that hit into `SWC_MAP[]`. Measure each leg pin-to-GND with a DMM while
-that pin is driven LOW and record the real number.
+> ⚠️ **The CP-71W has no SWC learn/study mode.** Confirmed on the unit. That means it
+> expects a **fixed factory ladder** whose values are undocumented and specific to this
+> radio — exactly the per-radio map PAC sells programming for. The values above are
+> therefore a starting guess, not a known-good map.
+>
+> To use the ladder you must first **discover** the real values: hand-tie single
+> resistors between the remote line and ground across roughly 0–5 kΩ (these inputs are
+> ADC-read, typically 0–255 over that span) and note which resistances trigger which
+> function. Then put the values that hit into `SWC_MAP[]`, measuring each leg pin-to-GND
+> with a DMM while that pin is driven LOW.
+>
+> **Because of this, IR is now the recommended path — see below.** The ladder stays
+> available behind `SWC_ENABLE` in case a sweep later turns up a usable map.
 
 ### Tuning
 
@@ -177,6 +185,51 @@ void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
 ```
 
 Build with `SWC_ENABLE 0` for CAN decode only, with no ladder output.
+
+---
+
+## Head Unit Control — IR (recommended)
+
+Because the CP-71W has no SWC learn mode, its resistive ladder is an undocumented
+fixed map that has to be reverse-engineered. The bundled **IR remote does not have
+that problem**: volume, mute, and track buttons are physically on it, so the codes
+provably exist and capturing them is deterministic rather than a search.
+
+### Step 1 — capture the codes
+
+`ir_capture/ir_capture.ino` is a standalone sketch that reads the remote and prints a
+paste-ready table.
+
+```
+IR receiver module (VS1838B / TSOP38238 / KY-022):
+  OUT → ESP32 GPIO18
+  VCC → 3.3V
+  GND → Common GND
+```
+
+Flash it, open Serial Monitor at 115200, point the remote at the receiver, and press
+VOL+, VOL−, MUTE, NEXT, PREV in turn. Press each several times — a well-behaved remote
+reports the same hex code every time. Send `d` over serial to dump the table.
+
+Almost certainly NEC at 38 kHz. If it decodes as `UNKNOWN`, the sketch falls back to
+printing raw timings, which are replayable with `sendRaw()`.
+
+### Step 2 — emit the codes
+
+Two ways to get IR into the head unit, in order of cleanliness:
+
+1. **Direct injection (preferred).** Tack-solder onto the *output pin* of the head
+   unit's own IR receiver and drive the demodulated logic-level signal there,
+   open-drain (small MOSFET or a 4066) so the original receiver still works. No line
+   of sight, immune to sunlight, completely hidden, no aiming.
+2. **IR LED at the faceplate.** A KY-005 / bare IR LED epoxied ~3 mm from the unit's
+   IR window. Less elegant, no disassembly.
+
+> ⚠️ **IR transmission must not run on the CAN core.** A full NEC frame is ~67 ms of
+> blocking carrier work — long enough to drop several inbound `0x25B` rotation frames,
+> the exact failure mode fixed in 1.1.0. Run `IRsend` in its own FreeRTOS task pinned
+> to core 0 (the Arduino `loop()` runs on core 1), fed by a queue, and keep the CAN
+> loop untouched.
 
 ---
 
