@@ -193,13 +193,18 @@ struct IrCode {
   uint16_t      bits;
 };
 
-// ⚠ PLACEHOLDERS — run ir_capture and replace all five.
+// Captured from the CP-71W remote 2026-07-28 with ir_capture.
+// All NEC, address 0x00, 32-bit. Every frame's inverted halves XOR to
+// 0xFF (addr^~addr and cmd^~cmd both checked), and each code repeated
+// identically 5-6 times, so these are solid.
+//   0xFF02FD cmd 0x02      0xFF9867 cmd 0x98      0xFFE21D cmd 0xE2
+//   0xFF906F cmd 0x90      0xFFE01F cmd 0xE0
 static const IrCode IR_CODES[KEY_COUNT] = {
-  /* KEY_VOL_UP   */ { decode_type_t::NEC, 0x0, 32 },
-  /* KEY_VOL_DOWN */ { decode_type_t::NEC, 0x0, 32 },
-  /* KEY_MUTE     */ { decode_type_t::NEC, 0x0, 32 },
-  /* KEY_NEXT     */ { decode_type_t::NEC, 0x0, 32 },
-  /* KEY_PREV     */ { decode_type_t::NEC, 0x0, 32 },
+  /* KEY_VOL_UP   */ { decode_type_t::NEC, 0xFF02FD, 32 },
+  /* KEY_VOL_DOWN */ { decode_type_t::NEC, 0xFF9867, 32 },
+  /* KEY_MUTE     */ { decode_type_t::NEC, 0xFFE21D, 32 },
+  /* KEY_NEXT     */ { decode_type_t::NEC, 0xFF906F, 32 },
+  /* KEY_PREV     */ { decode_type_t::NEC, 0xFFE01F, 32 },
 };
 
 static QueueHandle_t irQueue = nullptr;

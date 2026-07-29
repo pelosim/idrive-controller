@@ -80,11 +80,16 @@ uint16_t noteCode(uint64_t code, decode_type_t proto, uint16_t bits) {
 void dumpTable() {
   Serial.println();
   Serial.println("════════ PASTE THIS INTO idrive_controller.ino ════════");
-  Serial.println("// Replace the label on each line with the button you pressed.");
-  Serial.println("static const IrCode IR_CODES[] = {");
+  Serial.println("// Rows are in first-seen order. Reorder them to match the");
+  Serial.println("// KEY_* order below, which is what the main sketch indexes by.");
+  Serial.println("static const IrCode IR_CODES[KEY_COUNT] = {");
+  static const char* slot[] = { "KEY_VOL_UP  ", "KEY_VOL_DOWN", "KEY_MUTE    ",
+                                "KEY_NEXT    ", "KEY_PREV    " };
   for (uint8_t i = 0; i < seenCount; i++) {
-    Serial.printf("  { \"BUTTON_%u\", decode_type_t::%s, 0x%llX, %u },  // seen %u time%s\n",
-                  i,
+    // Emit exactly the IrCode layout the main sketch declares — no label
+    // field — so this pastes in and compiles as-is.
+    Serial.printf("  /* %s */ { decode_type_t::%s, 0x%llX, %u },  // seen %u time%s\n",
+                  i < 5 ? slot[i] : "??????????? ",
                   typeToString(seen[i].proto).c_str(),
                   (unsigned long long)seen[i].code,
                   seen[i].bits,
@@ -157,10 +162,16 @@ void loop() {
     Serial.printf("  Bits     : %u\n", results.bits);
     Serial.printf("  Seen     : %u time%s\n", n, n == 1 ? "" : "s");
     if (results.decode_type == decode_type_t::NEC) {
-      // NEC carries an 8-bit address + 8-bit command; handy for sanity.
-      Serial.printf("  NEC addr : 0x%02X   cmd: 0x%02X\n",
-                    (uint8_t)((results.value >> 8)  & 0xFF),
-                    (uint8_t)((results.value >> 16) & 0xFF));
+      // A 32-bit NEC frame is addr | ~addr | cmd | ~cmd, MSB first. Both
+      // inverted halves must XOR to 0xFF — that check is what separates a
+      // real capture from noise or a half-seen frame.
+      uint8_t addr  = (uint8_t)((results.value >> 24) & 0xFF);
+      uint8_t naddr = (uint8_t)((results.value >> 16) & 0xFF);
+      uint8_t cmd   = (uint8_t)((results.value >>  8) & 0xFF);
+      uint8_t ncmd  = (uint8_t)( results.value        & 0xFF);
+      bool valid = ((addr ^ naddr) == 0xFF) && ((cmd ^ ncmd) == 0xFF);
+      Serial.printf("  NEC addr : 0x%02X   cmd: 0x%02X   checksum: %s\n",
+                    addr, cmd, valid ? "VALID" : "BAD — re-capture this one");
     }
     Serial.println("──────────────────────────────────────────────");
   }
