@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════
 // BMW F-Series iDrive — Universal CAN Input Controller
 // Hardware: Lonely Binary ESP32-S3 + SN65HVD230 CAN transceiver
-// Version:  1.2.0
+// Version:  1.3.0  — IN-CAR BUILD (bench diagnostics off)
 // Author:   Mark Pelosi
 // License:  MIT
 // Repo:     https://github.com/pelosim/idrive-controller
@@ -21,11 +21,21 @@
 //   by blind sweeping. The bundled remote's buttons provably exist, so
 //   capturing them is a measurement rather than a search.
 //
-// ── BEFORE THIS WILL DO ANYTHING ────────────────────────────────────
-//   IR_CODES[] below ships with PLACEHOLDER zeros. Flash
-//   ir_capture/ir_capture.ino, capture the real codes off the remote,
-//   and paste them in. The sketch warns on boot for every code still
-//   left at zero.
+// ── BUILD CONFIGURATION ─────────────────────────────────────────────
+//   This is the IN-CAR build. Flags, and what to change for bench work:
+//
+//     OUT_IR              1   IR remote replay — the working path
+//     OUT_SWC             0   resistive ladder — needs a sweep first
+//     IR_LOOPBACK_MONITOR 0   set 1 on the bench (needs receiver GPIO18)
+//     DEBUG_ROTATION      0   set 1 if rotation ever misbehaves again
+//     IR_CARRIER_BYPASS   0   set 1 only if injecting at the radio's
+//                             IR receiver pin instead of using an LED
+//
+//   IR_CODES[] is populated with real codes captured from the CP-71W
+//   remote on 2026-07-28 and verified by loopback (15/15).
+//
+//   Serial.setTxTimeoutMs(0) in setup() is LOAD-BEARING for the in-car
+//   build — see the comment there before touching it.
 // ────────────────────────────────────────────────────────────────────
 //
 // WIRING — CAN side:
@@ -136,9 +146,10 @@
 #define OUT_SWC  0    // resistive wired-remote     — needs a sweep first
 
 // Bench aid: with an IR receiver wired to IR_RX_PIN, every transmitted
-// code is read back and verified. Turn this OFF for the in-car install —
-// it costs an echo-wait after each send and needs the extra receiver.
-#define IR_LOOPBACK_MONITOR 1
+// code is read back and verified. OFF for the in-car install — there is
+// no receiver in the car, so it would report 100% failures and burn
+// cycles formatting output nobody reads. Set to 1 on the bench.
+#define IR_LOOPBACK_MONITOR 0
 
 #if OUT_IR
   #include <IRremoteESP8266.h>
@@ -169,7 +180,10 @@
 #define SLOW_KA_MS   1000  // Slow keepalive interval ms (0x563)
 #define ILLUM_LEVEL  0xFD  // Backlight brightness: 0x00=off, 0xFD=full
 #define MAX_STEP     12    // clamp: max volume steps from one CAN frame
-#define DEBUG_ROTATION 1   // log why a knob movement was ignored (bench only)
+// Logs every knob movement the gate refuses, and every b2 transition.
+// This is how the "rotation dies after ~20s" bug was found — set it back
+// to 1 if rotation ever misbehaves again, in the car or on the bench.
+#define DEBUG_ROTATION 0
 
 // ═══════════════════════════════════════════════════════════════════
 // LOGICAL KEYS — shared by both output backends
@@ -582,6 +596,13 @@ void handleFrame(twai_message_t& msg) {
   uint8_t b5 = msg.data[5];
   uint8_t b6 = msg.data[6];
   uint8_t b7 = msg.data[7];
+
+  // b2 is deliberately not used for anything now — gating rotation on it
+  // was the v1.0.0 bug. Kept named for frame-layout clarity and read by
+  // the rotation diagnostics when DEBUG_ROTATION is on.
+#if !DEBUG_ROTATION
+  (void)b2;
+#endif
 
   // ── Knob press — bit0 of b3, rising edge ─────────────────────
   if ((b3 & 0x01) && !(lastB3 & 0x01))

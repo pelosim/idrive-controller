@@ -100,11 +100,35 @@ carrier work. Run `IRsend` in a FreeRTOS task pinned to **core 0** (Arduino `loo
 runs on core 1) fed by a queue. Putting it inline in `loop()` would reintroduce the
 exact frame-dropping bug fixed in 1.1.0.
 
+## Status: v1.3.0 is the in-car build
+Tagged `v1.3.0`. Everything on the ESP32 side is verified on hardware; the only
+untested link is whether the radio physically responds to the IR.
+
+Verified: 339 rotation events over 95 s with no spurious drops · 157 CAN events
+expanding to exactly 190 IR sends (per-detent volume exact) · ir_loopback 15/15 ·
+both host test suites pass · zero warnings across all four flag combinations.
+
+**Known limit — IR is rate-bound.** A NEC frame is ~67 ms, so at the 112 ms cadence
+the ceiling is ~9 volume steps/second. A fast flick queues more than that and the
+bounded queue drops the excess (deliberately — the alternative is the LED and volume
+trailing seconds behind the knob). The fix, once the radio is available to test
+against, is NEC **hold-repeat** frames: a repeat is ~11 ms versus ~67 ms, so holding
+ramps roughly 6x faster. The captured remote does emit clean repeats.
+
 ## Open next steps
-- Capture the remote codes with `ir_capture`, then wire IR send into the main sketch
-  as a core-0 task. Expect NEC; fall back to `sendRaw()` if it decodes as UNKNOWN.
+- **In-car test.** Does the CP-71W respond to the LED, and at what range? If it works
+  close up but not from the dash, that is drive current, not code — put the LED behind
+  a 2N3904 rather than straight off the GPIO.
+- **Does the radio honour NEC hold-repeats?** This decides whether volume stays as
+  discrete presses or becomes assert-and-hold during sustained rotation.
 - Decide the IR emit method: direct injection at the head unit's IR receiver output
-  pin (preferred — hidden, no line of sight) vs an LED at the faceplate window.
+  pin (preferred — hidden, no line of sight, set `IR_CARRIER_BYPASS 1`) vs the LED at
+  the faceplate window (`IR_CARRIER_BYPASS 0`, currently).
+- **Unresolved:** the bench loopback monitor went to 100% UNKNOWN echoes after the
+  emitter was repositioned (223 garbled from 487 sends, previously 144 good / 33 bad).
+  Almost certainly geometry — the discriminator is to re-run `ir_loopback`, which
+  sends at a gentle 250 ms cadence and passed 15/15 before. Not blocking the in-car
+  test, since the transmit path itself is verified.
 - If the ladder is ever revisited: sweep 0–5 kΩ to find the fixed map, then tune
   `SWC_HOLD_MS`/`SWC_GAP_MS` down from 140/60 (current 200 ms cadence means a
   10-detent spin takes ~2 s to play out).

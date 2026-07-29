@@ -41,6 +41,26 @@ SN65HVD230 CTX   →  ESP32-S3 GPIO4
 
 ---
 
+## Build Configuration
+
+`idrive_controller.ino` ships as the **in-car build**. Compile-time flags near the
+top of the file:
+
+| Flag | In-car | Bench | Purpose |
+|---|---|---|---|
+| `OUT_IR` | `1` | `1` | IR remote replay — the working output path |
+| `OUT_SWC` | `0` | `0` | Resistive ladder — needs a resistance sweep first |
+| `IR_LOOPBACK_MONITOR` | `0` | `1` | Verify each send via a receiver on GPIO18 |
+| `DEBUG_ROTATION` | `0` | `1` | Log every rotation the gate refuses, and `b2` changes |
+| `IR_CARRIER_BYPASS` | `0` | `0` | `1` only when injecting at the radio's IR receiver pin |
+
+> ⚠️ **`Serial.setTxTimeoutMs(0)` in `setup()` is load-bearing — do not remove it.**
+> Hardware USB CDC blocks on write when no host drains the FIFO (`tx_timeout_ms=100`,
+> up to 20 consecutive timeouts ≈ **2 s per write**). This sketch prints on every
+> input event, so with no serial monitor attached — i.e. in the car — `loop()` stalls
+> on every press and the NeoPixel visibly lags and drops events. Opening a terminal
+> makes the symptom vanish, which makes it very easy to misdiagnose as flaky hardware.
+
 ## Arduino IDE Settings
 
 | Setting | Value |
@@ -71,6 +91,19 @@ Install via Arduino IDE Library Manager:
 ## Complete Button Map
 
 All inputs arrive on CAN ID `0x25B` at 500 kbps.
+
+> ⚠️ **Do not gate rotation on `b2`.** `b2` is not the two-state flag it looks like.
+> It takes at least `0x7F`, `0x80` and `0x81`, and it **latches at `0x81` during
+> sustained rotation** until a knob press resets it. Versions before 1.3.0 gated
+> rotation on `b2 == 0x80`, so after roughly 20 seconds of continuous turning every
+> rotation event was silently discarded while the buttons kept working. Measured on
+> the bench: 84 of 89 dropped rotations were `b2 == 0x81`, across only 5 `b2`
+> transitions in 90 seconds. Rotation is decoded purely from the `b1` delta, and is
+> suppressed only while the knob is physically pressed.
+>
+> ⚠️ **`0xFF` is a real encoder position, not a sentinel.** The old code used
+> `lastB1 == 0xFF` to mean "no reference", which threw away a genuine detent every
+> time the counter wrapped through it. Use the explicit `lastB1Valid` flag.
 
 | Input | Byte | Detection |
 |---|---|---|
