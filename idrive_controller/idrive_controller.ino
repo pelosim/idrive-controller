@@ -203,6 +203,107 @@ static const char* KEY_NAME[KEY_COUNT] __attribute__((unused)) = {
 };
 
 // ═══════════════════════════════════════════════════════════════════
+// MODE LAYER
+// ═══════════════════════════════════════════════════════════════════
+// The same knob and d-pad mean different things depending on mode. Mode
+// is selected by the labelled buttons, whose printed names roughly match
+// what they now do — that matters when operating by feel while driving.
+//
+//   MEDIA  head unit over IR   (the v1.3.0 behaviour, unchanged)
+//   HVAC   the Pi climate control
+//   LIGHT  the ESP-NOW lighting controller
+//   GAUGE  the T-Display gauge panels
+//
+// Two rules keep it from becoming a foot-gun:
+//   * The NeoPixel flashes a signature colour on every mode change, so
+//     you always know what the knob is about to do.
+//   * Any non-MEDIA mode auto-reverts to MEDIA after MODE_TIMEOUT_MS of
+//     inactivity. Volume is what you reach for by default; it should be
+//     what the knob does unless you *just* said otherwise.
+//
+// Only MEDIA drives real hardware today. Every other mode emits a
+// structured action on the link (see LINK below) — the interaction is
+// fully testable now, and the transport can be added without touching
+// any of this.
+// ═══════════════════════════════════════════════════════════════════
+
+#define MODE_TIMEOUT_MS 10000   // idle revert to MEDIA
+
+enum : uint8_t { MODE_MEDIA = 0, MODE_HVAC, MODE_LIGHT, MODE_GAUGE, MODE_COUNT };
+
+static const char* MODE_NAME[MODE_COUNT] = { "MEDIA", "HVAC", "LIGHT", "GAUGE" };
+
+// Signature colours. HVAC/LIGHT borrow the 944S VFD dash palette so the
+// controller reads as part of the same system: amber = heat, ice blue.
+static const uint8_t MODE_RGB[MODE_COUNT][3] = {
+  { 0x2C, 0xE8, 0xD8 },   // MEDIA — phosphor teal
+  { 0xFF, 0xB0, 0x00 },   // HVAC  — amber
+  { 0x9C, 0x40, 0xFF },   // LIGHT — violet
+  { 0x5C, 0xB8, 0xFF },   // GAUGE — ice blue
+};
+
+// Actions. The five MEDIA actions MUST stay first and in KEY_* order —
+// dispatch converts them with (act - ACT_VOL_UP).
+enum : uint8_t {
+  ACT_NONE = 0,
+  ACT_VOL_UP, ACT_VOL_DOWN, ACT_MUTE, ACT_NEXT, ACT_PREV,
+  ACT_TEMP_UP, ACT_TEMP_DOWN, ACT_FAN_UP, ACT_FAN_DOWN,
+  ACT_HVAC_MODE_PREV, ACT_HVAC_MODE_NEXT, ACT_HVAC_TOGGLE,
+  ACT_LIGHT_BRIGHTER, ACT_LIGHT_DIMMER,
+  ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_LIGHT_TOGGLE,
+  ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN,
+  ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_GAUGE_SELECT,
+  ACT_COUNT
+};
+
+static const char* ACT_NAME[ACT_COUNT] = {
+  "NONE",
+  "VOL_UP", "VOL_DOWN", "MUTE", "NEXT", "PREV",
+  "TEMP_UP", "TEMP_DOWN", "FAN_UP", "FAN_DOWN",
+  "HVAC_MODE_PREV", "HVAC_MODE_NEXT", "HVAC_TOGGLE",
+  "LIGHT_BRIGHTER", "LIGHT_DIMMER",
+  "LIGHT_SCENE_PREV", "LIGHT_SCENE_NEXT", "LIGHT_TOGGLE",
+  "GAUGE_SCROLL_UP", "GAUGE_SCROLL_DOWN",
+  "GAUGE_PAGE_PREV", "GAUGE_PAGE_NEXT", "GAUGE_SELECT",
+};
+
+// What each physical input does in each mode.
+struct ModeMap { uint8_t knobCW, knobCCW, knobPress, left, right, up, down; };
+
+static const ModeMap MODE_MAP[MODE_COUNT] = {
+  /* MEDIA */ { ACT_VOL_UP,         ACT_VOL_DOWN,        ACT_MUTE,
+                ACT_PREV,           ACT_NEXT,            ACT_NONE,          ACT_NONE },
+  /* HVAC  */ { ACT_TEMP_UP,        ACT_TEMP_DOWN,       ACT_HVAC_TOGGLE,
+                ACT_HVAC_MODE_PREV, ACT_HVAC_MODE_NEXT,  ACT_FAN_UP,        ACT_FAN_DOWN },
+  /* LIGHT */ { ACT_LIGHT_BRIGHTER, ACT_LIGHT_DIMMER,    ACT_LIGHT_TOGGLE,
+                ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_NONE,       ACT_NONE },
+  /* GAUGE */ { ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN, ACT_GAUGE_SELECT,
+                ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_NONE,         ACT_NONE },
+};
+
+static uint8_t  activeMode    = MODE_MEDIA;
+static uint32_t modeTouchedAt = 0;
+
+// ═══════════════════════════════════════════════════════════════════
+// LINK — structured output for everything that is not the head unit
+// ═══════════════════════════════════════════════════════════════════
+// Newline-delimited JSON, one object per event. Chosen because it is
+// trivially parseable on the Pi (json.loads per readline), self-framing
+// over a lossy serial line, and human-readable when debugging.
+//
+// Emitted on a HARDWARE UART, deliberately separate from the USB CDC
+// console: mixing machine protocol with debug text on one stream makes
+// both worse, and USB CDC on this board is also the programming port.
+// Set LINK_UART 0 to emit only to the USB console.
+// ═══════════════════════════════════════════════════════════════════
+
+#define LINK_UART     1        // 1 = also write NDJSON to the hardware UART
+#define LINK_BAUD     115200
+#define LINK_TX_PIN   43       // board's labelled UART header (U0TXD)
+#define LINK_RX_PIN   44       // (U0RXD) — change if your header differs
+#define LinkSerial    Serial1
+
+// ═══════════════════════════════════════════════════════════════════
 // IR BACKEND
 // ═══════════════════════════════════════════════════════════════════
 // Codes come from ir_capture/ir_capture.ino. Until they are pasted in,
@@ -514,20 +615,87 @@ void sendFrame(uint16_t id, uint8_t len, uint8_t* data) {
 // ── Button/input event handler ────────────────────────────────────
 // This is your integration point. `count` is >1 only for knob rotation,
 // where one CAN frame can carry several detents.
+// ── Link: emit one structured event ───────────────────────────────
+static void linkEmit(const char* action, uint8_t count) {
+  char buf[112];
+  int n = snprintf(buf, sizeof buf,
+                   "{\"mode\":\"%s\",\"action\":\"%s\",\"count\":%u}\n",
+                   MODE_NAME[activeMode], action, (unsigned)count);
+  if (n <= 0) return;
+  if (n > (int)sizeof buf) n = sizeof buf - 1;
+#if LINK_UART
+  LinkSerial.write((const uint8_t*)buf, n);
+#endif
+  Serial.printf("   -> %s", buf);   // human echo on the USB console
+}
+
+// ── Mode switching ────────────────────────────────────────────────
+static void modeSet(uint8_t m) {
+  if (m >= MODE_COUNT) return;
+  bool changed = (m != activeMode);
+  activeMode    = m;
+  modeTouchedAt = millis();
+  if (changed) {
+    Serial.printf("MODE -> %s\n", MODE_NAME[m]);
+    linkEmit("MODE_ENTER", 1);
+  }
+  flashLED(MODE_RGB[m][0], MODE_RGB[m][1], MODE_RGB[m][2]);
+}
+
+// Auto-revert to MEDIA so the knob is never unexpectedly wired to
+// something else. Called every loop.
+static void modeService() {
+  if (activeMode == MODE_MEDIA) return;
+  if ((int32_t)(millis() - (modeTouchedAt + MODE_TIMEOUT_MS)) >= 0) {
+    Serial.println("MODE timeout — reverting to MEDIA");
+    modeSet(MODE_MEDIA);
+  }
+}
+
+// ── Action dispatch ───────────────────────────────────────────────
+// The five MEDIA actions are contiguous and in KEY_* order, so they
+// convert directly. Everything else goes out on the link.
+static void dispatchAction(uint8_t act, uint8_t count) {
+  if (act == ACT_NONE || act >= ACT_COUNT) return;
+  modeTouchedAt = millis();          // any real action keeps the mode alive
+  if (act >= ACT_VOL_UP && act <= ACT_PREV) {
+    outPush((uint8_t)(act - ACT_VOL_UP), count);
+  } else {
+    linkEmit(ACT_NAME[act], count);
+  }
+}
+
 void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
                    uint8_t count = 1) {
   if (count > 1) Serial.printf("PRESS: %s x%u\n", name, count);
   else           Serial.printf("PRESS: %s\n", name);
+
+  // ── Mode selection — these never produce an action ────────────
+  // BACK is the panic button: always returns to volume control.
+  if      (!strcmp(name, "MEDIA")) { modeSet(MODE_MEDIA); return; }
+  else if (!strcmp(name, "NAV"))   { modeSet(MODE_HVAC);  return; }
+  else if (!strcmp(name, "MAP"))   { modeSet(MODE_LIGHT); return; }
+  else if (!strcmp(name, "MENU"))  { modeSet(MODE_GAUGE); return; }
+  else if (!strcmp(name, "BACK"))  { modeSet(MODE_MEDIA); return; }
+
   flashLED(r, g, b);
 
-  // ── Head unit control ────────────────────────────────────────
-  if      (!strcmp(name, "KNOB_CW"))    outPush(KEY_VOL_UP,   count);
-  else if (!strcmp(name, "KNOB_CCW"))   outPush(KEY_VOL_DOWN, count);
-  else if (!strcmp(name, "KNOB_PRESS")) outPush(KEY_MUTE,     1);
-  else if (!strcmp(name, "RIGHT"))      outPush(KEY_NEXT,     1);
-  else if (!strcmp(name, "LEFT"))       outPush(KEY_PREV,     1);
+  // ── Everything else is interpreted through the active mode ────
+  const ModeMap& mm = MODE_MAP[activeMode];
+  uint8_t act = ACT_NONE;
+  if      (!strcmp(name, "KNOB_CW"))    act = mm.knobCW;
+  else if (!strcmp(name, "KNOB_CCW"))   act = mm.knobCCW;
+  else if (!strcmp(name, "KNOB_PRESS")) act = mm.knobPress;
+  else if (!strcmp(name, "LEFT"))       act = mm.left;
+  else if (!strcmp(name, "RIGHT"))      act = mm.right;
+  else if (!strcmp(name, "UP"))         act = mm.up;
+  else if (!strcmp(name, "DOWN"))       act = mm.down;
 
-  // Unmapped so far: UP, DOWN, MENU, BACK, OPTION, COM, MEDIA, NAV, MAP
+  // Rotation carries a detent count; discrete presses are always 1.
+  bool isRotation = !strcmp(name, "KNOB_CW") || !strcmp(name, "KNOB_CCW");
+  dispatchAction(act, isRotation ? count : 1);
+
+  // Still unmapped and free for future use: OPTION, COM.
 }
 
 // ── Fast keepalive — send every KEEPALIVE_MS ─────────────────────
@@ -729,6 +897,11 @@ void setup() {
   // 0 = never block; output is simply discarded when nobody listens.
   Serial.setTxTimeoutMs(0);
 
+#if LINK_UART
+  // Machine protocol on its own hardware UART, away from the USB console.
+  LinkSerial.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
+#endif
+
 #if OUT_SWC
   swcInit();   // all ladder legs high-Z before anything else
 #endif
@@ -830,6 +1003,17 @@ void setup() {
   Serial.println("No output backend compiled in — decode only.");
 #endif
 
+#if LINK_UART
+  Serial.printf("LINK: NDJSON on UART TX=GPIO%u RX=GPIO%u @ %u baud\n",
+                LINK_TX_PIN, LINK_RX_PIN, (unsigned)LINK_BAUD);
+#else
+  Serial.println("LINK: USB console only (LINK_UART=0)");
+#endif
+  Serial.printf("MODE: %s  (auto-revert after %ums idle)\n",
+                MODE_NAME[activeMode], (unsigned)MODE_TIMEOUT_MS);
+  Serial.println("  MEDIA=media  NAV=hvac  MAP=light  MENU=gauge  BACK=media");
+
+  modeTouchedAt = millis();
   Serial.println("Waiting for 0x5E7 init handshake...");
 }
 
@@ -850,6 +1034,7 @@ void loop() {
     handleFrame(msg);
   }
 
+  modeService();  // revert to MEDIA after an idle period
 #if OUT_SWC
   swcService();   // advance the ladder press state machine
 #endif
