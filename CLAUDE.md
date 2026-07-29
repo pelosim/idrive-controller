@@ -62,6 +62,18 @@ Arduino IDE equivalent: ESP32S3 Dev Module, USB CDC On Boot **Enabled**,
 USB Mode "Hardware CDC and JTAG", Flash 16MB, PSRAM OPI.
 Upload hangs at "Connecting..." → hold BOOT, tap RESET, release BOOT.
 
+## Gotcha: USB CDC blocks when nothing is listening
+`Serial.setTxTimeoutMs(0)` in `setup()` is load-bearing — do not drop it.
+Hardware USB CDC blocks on write when no host drains the FIFO: the core uses
+`tx_timeout_ms=100` with up to 20 consecutive timeouts, so a single `printf`
+can stall ~2 s once the buffer backs up. Since this sketch prints on every
+input event, running **without** a serial monitor — i.e. in the car — stalls
+`loop()` on every press and makes the NeoPixel lag and drop events.
+
+The trap is that opening a terminal makes it disappear, so it reads as flaky
+hardware or a bad encoder. Found 2026-07-28 exactly that way: the LED was
+erratic, then became perfect the moment a `cat` on the port started.
+
 ## Conventions
 - **Full deployable `.ino` files, never diffs or snippets** — Mark flashes whole files.
 - Nothing blocking in `loop()`. The 20 ms keep-alive cadence is load-bearing: if it

@@ -132,9 +132,18 @@
 #define OUT_IR   1    // IR remote replay          — primary
 #define OUT_SWC  0    // resistive wired-remote     — needs a sweep first
 
+// Bench aid: with an IR receiver wired to IR_RX_PIN, every transmitted
+// code is read back and verified. Turn this OFF for the in-car install —
+// it costs an echo-wait after each send and needs the extra receiver.
+#define IR_LOOPBACK_MONITOR 1
+
 #if OUT_IR
   #include <IRremoteESP8266.h>
   #include <IRsend.h>
+  #if IR_LOOPBACK_MONITOR
+    #include <IRrecv.h>
+    #include <IRutils.h>
+  #endif
 #endif
 
 // ── Pin definitions ──────────────────────────────────────────────
@@ -142,9 +151,17 @@
 #define CRX_PIN   8    // SN65HVD230 CRX
 #define LED_PIN   48   // Onboard NeoPixel (Lonely Binary ESP32-S3)
 #define IR_TX_PIN 17   // IR LED (or injection line into the head unit)
+#define IR_RX_PIN 18   // IR receiver — bench loopback monitor only
 
 // ── Tunable parameters ───────────────────────────────────────────
-#define PULSE_MS     150   // LED flash duration ms
+// LED blink timing. ON+GAP is ~115 ms, deliberately close to the IR frame
+// period, so a fast knob spin produces one visible blink per detent rather
+// than one continuous glow. The GAP is the important part: without an
+// enforced dark period, two consecutive same-colour flashes merge into one
+// and the LED stops reporting individual presses.
+#define PULSE_MS      70   // LED lit duration ms
+#define LED_GAP_MS    45   // enforced dark period between blinks
+#define LED_QUEUE_LEN  8   // pending blinks; bounded so it cannot lag far behind
 #define KEEPALIVE_MS 20    // Fast keepalive interval ms
 #define SLOW_KA_MS   1000  // Slow keepalive interval ms (0x563)
 #define ILLUM_LEVEL  0xFD  // Backlight brightness: 0x00=off, 0xFD=full
@@ -182,10 +199,32 @@ static const char* KEY_NAME[KEY_COUNT] __attribute__((unused)) = {
 #if OUT_IR
 
 #define IR_QUEUE_LEN      32
-#define IR_GAP_MS         40    // quiet time between consecutive frames
-#define IR_TASK_STACK     4096
+// A NEC frame is ~67 ms, and the protocol repeats on a 110 ms period. 45 ms
+// of quiet puts frame-to-frame at ~112 ms, matching what a real remote does —
+// so the head unit sees the cadence it already expects.
+#define IR_GAP_MS         45    // quiet time between consecutive frames
+#define IR_TASK_STACK     6144
 #define IR_TASK_CORE      0     // Arduino loop() runs on core 1
 #define IR_CARRIER_BYPASS 0     // 1 = injecting at the receiver pin
+#define IR_ECHO_WINDOW_MS 200   // loopback monitor: max wait for the echo
+
+#if IR_LOOPBACK_MONITOR
+// The receiver lives on CORE 1 with the Arduino loop, never inside irTask.
+// Registering the IR receive interrupt from a core-0 task goes through the
+// inter-processor call path and overflows ipc0's small stack — an instant
+// "Stack canary watchpoint triggered (ipc0)" panic at boot. Send on core 0,
+// receive on core 1.
+// 15 ms end-of-frame timeout, NOT the 50 ms used in ir_capture. The timeout
+// must be SHORTER than IR_GAP_MS or back-to-back sends get concatenated into
+// one buffer and decode as garbage — which shows up as spurious "UNKNOWN
+// echo" lines during a fast knob spin. ir_capture keeps 50 ms on purpose:
+// it is a discovery tool that may meet protocols with long internal gaps.
+IRrecv         irMonitor(IR_RX_PIN, 1024, 15, true);
+decode_results irRes;
+// Counters are diagnostics only, written on one core and read on the other;
+// a stale read just misprints a tally, so no synchronisation is warranted.
+static volatile uint32_t irSent = 0, irEchoed = 0;
+#endif
 
 struct IrCode {
   decode_type_t proto;
@@ -214,16 +253,46 @@ static QueueHandle_t irQueue = nullptr;
 static void irTask(void* arg) {
   IRsend irsend(IR_TX_PIN, false, !IR_CARRIER_BYPASS);
   irsend.begin();
+
   uint8_t key;
   for (;;) {
     if (xQueueReceive(irQueue, &key, portMAX_DELAY) != pdTRUE) continue;
     if (key >= KEY_COUNT) continue;
     const IrCode& c = IR_CODES[key];
     if (c.code == 0) continue;                 // not captured yet
+
     irsend.send(c.proto, c.code, c.bits);
+
+#if IR_LOOPBACK_MONITOR
+    irSent = irSent + 1;                       // '++' on volatile is deprecated
+    Serial.printf("   IR sent  %-9s\n", KEY_NAME[key]);
+#endif
+
     vTaskDelay(pdMS_TO_TICKS(IR_GAP_MS));
   }
 }
+
+#if IR_LOOPBACK_MONITOR
+// Runs on core 1 from loop(). Each code is unique, so a decoded value maps
+// straight back to the key that produced it — no cross-core coordination.
+// "sent" climbing without "echo" following means the LED is not emitting.
+static void irMonitorService() {
+  if (!irMonitor.decode(&irRes)) return;
+  if (!irRes.repeat) {
+    int8_t k = -1;
+    for (uint8_t i = 0; i < KEY_COUNT; i++)
+      if (IR_CODES[i].code == irRes.value) { k = (int8_t)i; break; }
+    irEchoed = irEchoed + 1;
+    if (k >= 0)
+      Serial.printf("   IR echo  %-9s VERIFIED   (sent %lu / echoed %lu)\n",
+                    KEY_NAME[k], (unsigned long)irSent, (unsigned long)irEchoed);
+    else
+      Serial.printf("   IR echo  UNKNOWN 0x%llX — not one of ours\n",
+                    (unsigned long long)irRes.value);
+  }
+  irMonitor.resume();
+}
+#endif
 
 static void irPush(uint8_t key, uint8_t times) {
   if (!irQueue || key >= KEY_COUNT) return;
@@ -345,7 +414,6 @@ Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
 unsigned long lastKeepalive = 0;
 unsigned long lastSlowKA    = 0;
 bool          initialized   = false;
-static uint32_t ledOffAt    = 0;   // 0 = LED already off
 
 // Previous frame state for edge detection
 uint8_t lastB1 = 0xFF;
@@ -355,27 +423,57 @@ uint8_t lastB5 = 0x00;
 uint8_t lastB6 = 0xC0;
 uint8_t lastB7 = 0xF8;
 
-// ── LED helpers — non-blocking in the event path ──────────────────
+// ── LED helpers — non-blocking, one distinct blink per press ──────
+// Three states: IDLE -> ON (lit PULSE_MS) -> GAP (dark LED_GAP_MS) -> IDLE.
+// Blinks queue rather than overwrite, so rapid presses of the SAME colour
+// still read as separate flashes. The queue is bounded: on a sustained fast
+// spin the LED drops extras instead of trailing seconds behind the knob.
+struct LedReq { uint8_t r, g, b; };
+static LedReq   ledQueue[LED_QUEUE_LEN];
+static uint8_t  ledHead = 0, ledTail = 0;
+static uint8_t  ledState = 0;          // 0 = idle, 1 = lit, 2 = dark gap
+static uint32_t ledUntil = 0;
+
 void flashLED(uint8_t r, uint8_t g, uint8_t b) {
-  led.setPixelColor(0, led.Color(r, g, b));
-  led.show();
-  ledOffAt = millis() + PULSE_MS;
-  if (!ledOffAt) ledOffAt = 1;   // never land on the "off" sentinel
+  uint8_t next = (uint8_t)((ledHead + 1) % LED_QUEUE_LEN);
+  if (next == ledTail) return;         // full — drop, never block
+  ledQueue[ledHead] = { r, g, b };
+  ledHead = next;
 }
 
 void ledService() {
-  if (ledOffAt && (int32_t)(millis() - ledOffAt) >= 0) {
+  uint32_t now = millis();
+
+  if (ledState == 1) {                 // lit — time to go dark?
+    if ((int32_t)(now - ledUntil) < 0) return;
     led.setPixelColor(0, led.Color(0, 0, 0));
     led.show();
-    ledOffAt = 0;
+    ledState = 2;
+    ledUntil = now + LED_GAP_MS;
+    return;
   }
+
+  if (ledState == 2) {                 // enforced dark gap
+    if ((int32_t)(now - ledUntil) < 0) return;
+    ledState = 0;
+    // deliberate fall-through: start the next queued blink on this same
+    // tick, so cadence is exactly PULSE_MS + LED_GAP_MS with no wasted cycle
+  }
+
+  if (ledHead == ledTail) return;      // idle, nothing pending
+  const LedReq& q = ledQueue[ledTail];
+  ledTail = (uint8_t)((ledTail + 1) % LED_QUEUE_LEN);
+  led.setPixelColor(0, led.Color(q.r, q.g, q.b));
+  led.show();
+  ledState = 1;
+  ledUntil = now + PULSE_MS;
 }
 
 // Blocking blink — setup() only, where stalling is harmless.
 void blinkBlocking(uint8_t r, uint8_t g, uint8_t b) {
   led.setPixelColor(0, led.Color(r, g, b));
   led.show();
-  delay(PULSE_MS);
+  delay(200);
   led.setPixelColor(0, led.Color(0, 0, 0));
   led.show();
 }
@@ -544,11 +642,26 @@ void handleFrame(twai_message_t& msg) {
 void setup() {
   Serial.begin(115200);
 
+  // ── CRITICAL: do not remove ────────────────────────────────────
+  // Hardware USB CDC writes BLOCK when no host is draining the FIFO.
+  // The core defaults to tx_timeout_ms=100 with up to 20 consecutive
+  // timeouts, so ONE Serial.printf can stall for ~2 seconds once the
+  // buffer backs up. This sketch prints on every input event, so with
+  // no serial monitor attached — i.e. installed in the car — loop()
+  // stalls on every press, and the NeoPixel lags and skips events.
+  // The symptom vanishes the instant a terminal is opened, which makes
+  // it very easy to misdiagnose as flaky hardware.
+  // 0 = never block; output is simply discarded when nobody listens.
+  Serial.setTxTimeoutMs(0);
+
 #if OUT_SWC
   swcInit();   // all ladder legs high-Z before anything else
 #endif
 
 #if OUT_IR
+  #if IR_LOOPBACK_MONITOR
+    irMonitor.enableIRIn();   // MUST be here on core 1, never inside irTask
+  #endif
   irQueue = xQueueCreate(IR_QUEUE_LEN, sizeof(uint8_t));
   xTaskCreatePinnedToCore(irTask, "irTask", IR_TASK_STACK,
                           nullptr, 1, nullptr, IR_TASK_CORE);
@@ -608,6 +721,8 @@ void setup() {
 #if OUT_IR
   xQueueReset(irQueue);
 #endif
+  ledHead = ledTail = 0;   // no leftover blinks from the wake loop
+  ledState = 0;
 
   blinkBlocking(255, 255, 255); // white = ready
   Serial.println("iDrive ready — all 14 inputs mapped");
@@ -616,6 +731,10 @@ void setup() {
   Serial.printf("IR output ACTIVE on GPIO%u (task on core %u)%s\n",
                 IR_TX_PIN, IR_TASK_CORE,
                 IR_CARRIER_BYPASS ? ", carrier BYPASSED" : "");
+#if IR_LOOPBACK_MONITOR
+  Serial.printf("  loopback monitor ON — receiver on GPIO%u verifies each send\n",
+                IR_RX_PIN);
+#endif
   uint8_t unset = irUnsetCount();
   if (unset) {
     Serial.printf("  ⚠ %u of %u IR codes are still placeholders — "
@@ -658,6 +777,9 @@ void loop() {
 
 #if OUT_SWC
   swcService();   // advance the ladder press state machine
+#endif
+#if OUT_IR && IR_LOOPBACK_MONITOR
+  irMonitorService();   // confirm each transmitted code actually went out
 #endif
   ledService();   // turn the NeoPixel back off when its time is up
 }
