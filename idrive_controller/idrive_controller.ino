@@ -82,7 +82,10 @@
 // COMPLETE BUTTON MAP (CAN ID 0x25B, 500 kbps):
 //   b0  — rolling counter (ignore)
 //   b1  — knob absolute position (signed delta = rotation)
-//   b2  — 0x7F=knob pressed, 0x80=at rest
+//   b2  — NOT a simple flag. Observed 0x7F, 0x80 and 0x81; latches at 0x81
+//         during sustained rotation and is reset by a knob press. Looks like
+//         -1/0/+1 around a signed centre. Logged but NOT used for gating —
+//         see the rotation section for why that mattered.
 //   b3  — bit0: KNOB_PRESS | upper nibble: UP=0x10 RIGHT=0x40 DOWN=0x70 LEFT=0xA0
 //   b4  — MENU=0x04, BACK=0x20
 //   b5  — OPTION=0x01, COM=0x08
@@ -166,6 +169,7 @@
 #define SLOW_KA_MS   1000  // Slow keepalive interval ms (0x563)
 #define ILLUM_LEVEL  0xFD  // Backlight brightness: 0x00=off, 0xFD=full
 #define MAX_STEP     12    // clamp: max volume steps from one CAN frame
+#define DEBUG_ROTATION 1   // log why a knob movement was ignored (bench only)
 
 // ═══════════════════════════════════════════════════════════════════
 // LOGICAL KEYS — shared by both output backends
@@ -416,7 +420,8 @@ unsigned long lastSlowKA    = 0;
 bool          initialized   = false;
 
 // Previous frame state for edge detection
-uint8_t lastB1 = 0xFF;
+uint8_t lastB1      = 0x00;
+bool    lastB1Valid = false;   // never use 0xFF as a sentinel — it is a real position
 uint8_t lastB3 = 0x00;
 uint8_t lastB4 = 0x00;
 uint8_t lastB5 = 0x00;
@@ -613,12 +618,54 @@ void handleFrame(twai_message_t& msg) {
   uint8_t b7diff = b7 ^ lastB7;
   if (b7diff & 0x01 && b7 & 0x01) onButtonPress("MAP",    255, 200, 0  ); // gold
 
+#if DEBUG_ROTATION
+  // Rotation dies after sustained spinning while buttons keep working —
+  // so the fault is in the gate below, not in frame reception. Log what
+  // b2 actually does, and every b1 change the gate throws away.
+  {
+    static uint8_t dbgLastB2  = 0x00;
+    static bool    dbgB2Init  = false;
+    static uint32_t dbgIgnored = 0;
+    if (!dbgB2Init) { dbgLastB2 = b2; dbgB2Init = true;
+      Serial.printf("  [dbg] initial b2=0x%02X b1=0x%02X\n", b2, b1); }
+    else if (b2 != dbgLastB2) {
+      Serial.printf("  [dbg] b2 CHANGED 0x%02X -> 0x%02X   (b1=0x%02X b3=0x%02X)\n",
+                    dbgLastB2, b2, b1, b3);
+      dbgLastB2 = b2;
+    }
+    // Did the knob move but the gate refuse it? After 1.3.0 the only
+    // legitimate reason is "knob is currently pressed".
+    if (b1 != lastB1 && !(lastB1Valid && !(b3 & 0x01))) {
+      dbgIgnored++;
+      Serial.printf("  [dbg] ROTATION DROPPED #%lu  b1 0x%02X->0x%02X  "
+                    "b2=0x%02X %s%s\n",
+                    (unsigned long)dbgIgnored, lastB1, b1, b2,
+                    (b3 & 0x01)   ? "[knob pressed - expected] " : "",
+                    (!lastB1Valid) ? "[no position reference yet]" : "");
+    }
+  }
+#endif
+
   // ── Knob rotation ─────────────────────────────────────────────
+  // b1 is an absolute 8-bit position counter; rotation is its delta.
+  //
+  // DO NOT gate this on b2 == 0x80 (as versions before 1.3.0 did). b2 is
+  // not the two-state flag it was assumed to be — it takes at least 0x7F,
+  // 0x80 and 0x81, and it LATCHES at 0x81 during sustained rotation. That
+  // silently killed every rotation event until a knob press reset it,
+  // while the buttons carried on working: the "encoder dies after ~20s but
+  // forward/back and press still respond" bug. Measured on the bench:
+  // 84 of 89 dropped rotations were b2 == 0x81.
+  //
+  // lastB1Valid replaces the old "lastB1 == 0xFF means invalid" sentinel.
+  // 0xFF is a legitimate encoder position, so the sentinel threw away a
+  // real detent every time the counter wrapped through it, and could wedge.
+  //
   // int8_t signed cast handles byte wraparound (e.g. 0xFF→0x01 = +2 not -254).
   // The magnitude is the detent count for this frame — emit that many
   // volume steps, not one. Promote to int16_t before negating so that
   // delta == -128 cannot overflow, then clamp against glitch frames.
-  if (b2 == 0x80 && lastB1 != 0xFF) {
+  if (lastB1Valid && !(b3 & 0x01)) {
     int8_t delta = (int8_t)(b1 - lastB1);
     if (delta != 0) {
       int16_t mag = delta > 0 ? (int16_t)delta : -(int16_t)delta;
@@ -629,8 +676,15 @@ void handleFrame(twai_message_t& msg) {
   }
 
   // ── Store previous state ──────────────────────────────────────
-  if (b3 & 0x01) lastB1 = 0xFF; // reset position ref while pressed
-  else            lastB1 = b1;
+  // While the knob is pressed, drop the position reference entirely so the
+  // press itself cannot register as rotation; it is re-established on the
+  // first frame after release.
+  if (b3 & 0x01) {
+    lastB1Valid = false;
+  } else {
+    lastB1      = b1;
+    lastB1Valid = true;
+  }
   lastB3 = b3;
   lastB4 = b4;
   lastB5 = b5;
