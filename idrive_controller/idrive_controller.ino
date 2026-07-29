@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════
 // BMW F-Series iDrive — Universal CAN Input Controller
 // Hardware: Lonely Binary ESP32-S3 + SN65HVD230 CAN transceiver
-// Version:  1.1.0
+// Version:  1.2.0
 // Author:   Mark Pelosi
 // License:  MIT
 // Repo:     https://github.com/pelosim/idrive-controller
@@ -10,8 +10,23 @@
 // DESCRIPTION:
 //   Decodes all inputs from a BMW F-Series iDrive controller (Preh,
 //   part #6582 6829079-03) over CAN bus and drives an aftermarket head
-//   unit's wired-remote (SWC) input via a switched resistor ladder.
-//   Default target: Power Acoustik CP-71W.
+//   unit. Target: Power Acoustik CP-71W.
+//
+//   Two output backends, selected at compile time below:
+//     OUT_IR   — replay the head unit's own IR remote codes  (PRIMARY)
+//     OUT_SWC  — resistive wired-remote ladder               (FALLBACK)
+//
+//   IR is primary because the CP-71W has NO SWC learn mode: its ladder
+//   is a fixed, undocumented, per-radio map that would have to be found
+//   by blind sweeping. The bundled remote's buttons provably exist, so
+//   capturing them is a measurement rather than a search.
+//
+// ── BEFORE THIS WILL DO ANYTHING ────────────────────────────────────
+//   IR_CODES[] below ships with PLACEHOLDER zeros. Flash
+//   ir_capture/ir_capture.ino, capture the real codes off the remote,
+//   and paste them in. The sketch warns on boot for every code still
+//   left at zero.
+// ────────────────────────────────────────────────────────────────────
 //
 // WIRING — CAN side:
 //   iDrive Green        → SN65HVD230 CANH
@@ -23,7 +38,22 @@
 //   SN65HVD230 CTX      → ESP32 GPIO4
 //   12V bench/car GND   → Common GND    ← floating ground = no data
 //
-// WIRING — SWC ladder output (see SWC section below for full notes):
+// WIRING — IR output (OUT_IR):
+//   GPIO17 → 220Ω → IR LED anode;  LED cathode → GND
+//   For more range drive the LED through a 2N3904: GPIO17 → 1kΩ → base,
+//   LED + 100Ω from 3.3V to collector, emitter → GND.
+//
+//   Two ways to get the light into the radio, best first:
+//     1. DIRECT INJECTION — tack onto the OUTPUT pin of the head unit's
+//        own IR receiver and drive the demodulated logic-level signal
+//        there, open-drain (small MOSFET or 4066) so the original
+//        receiver still works. No line of sight, immune to sunlight,
+//        fully hidden. Note: injecting demodulated signal means you are
+//        bypassing the 38 kHz carrier — see IR_CARRIER_BYPASS below.
+//     2. LED AT THE FACEPLATE — IR LED epoxied ~3mm from the unit's IR
+//        window. No disassembly, slightly less tidy.
+//
+// WIRING — SWC ladder output (OUT_SWC, fallback only):
 //   GPIO5  ─[560Ω] ─┐
 //   GPIO6  ─[1.0kΩ]─┤
 //   GPIO7  ─[1.5kΩ]─┼── head unit wired-remote line (3.5mm TIP,
@@ -31,11 +61,11 @@
 //   GPIO16 ─[3.9kΩ]─┘
 //   Head unit remote GND (3.5mm SLEEVE) → Common GND
 //
-//   ⚠ BEFORE WIRING: measure the head unit's remote line to ground with
-//     nothing connected. If it sits above 3.3V (many units pull up to
-//     5V), do NOT drive the GPIOs into it directly — put a 2N7000 per
-//     leg (gate←GPIO, drain→resistor→line, source→GND) so the ESP32
-//     never touches the line. See the SWC section for detail.
+//   ⚠ Those values are a GUESS. The CP-71W has no learn mode, so the
+//     real map must be discovered by sweeping ~0–5kΩ first.
+//   ⚠ Measure the remote line to ground before wiring. If it sits above
+//     3.3V, put a 2N7000 in each leg (gate←GPIO, drain→resistor→line,
+//     source→GND) so the ESP32 never touches the line.
 //
 // ARDUINO IDE SETTINGS:
 //   Board:           ESP32S3 Dev Module
@@ -46,7 +76,8 @@
 //   PSRAM:           OPI PSRAM
 //
 // DEPENDENCIES:
-//   - Adafruit NeoPixel (install via Library Manager)
+//   - Adafruit NeoPixel
+//   - IRremoteESP8266   (only when OUT_IR is 1; works fine on ESP32-S3)
 //
 // COMPLETE BUTTON MAP (CAN ID 0x25B, 500 kbps):
 //   b0  — rolling counter (ignore)
@@ -72,103 +103,236 @@
 //   - Directional pad may need knob press first on bench
 //     (expected to work without in car)
 //
+// CHANGES IN 1.2.0:
+//   - Added the IR output backend, now the primary path. IRsend runs in
+//     its own FreeRTOS task pinned to CORE 0, fed by a queue. This is
+//     not optional: a full NEC frame is ~67 ms of blocking carrier work,
+//     which inline in loop() would drop several inbound 0x25B rotation
+//     frames — the exact failure mode fixed in 1.1.0.
+//   - Unified both backends behind one KEY_* enum and outPush(), so a
+//     mapping change applies to whichever backend is compiled in.
+//
 // CHANGES IN 1.1.0:
 //   - SWC output implemented as a switched RESISTOR LADDER, replacing
 //     the planned PWM+RC voltage output (which cannot work — the head
 //     unit measures resistance against its own pull-up, so a 10k/10µF
 //     source is both too high-impedance and far too slow).
-//   - LED flash and SWC key presses are now fully non-blocking. The old
-//     delay(150) inside onButtonPress() stalled the 20 ms keep-alives
-//     and dropped inbound frames on every press.
-//   - Knob rotation now emits one volume step PER DETENT. Previously a
-//     multi-count delta fired a single event, losing most of a fast spin.
+//   - LED flash and SWC key presses are now fully non-blocking.
+//   - Knob rotation emits one volume step PER DETENT.
 // ═══════════════════════════════════════════════════════════════════
 
 #include "driver/twai.h"
 #include <Adafruit_NeoPixel.h>
 
+// ═══════════════════════════════════════════════════════════════════
+// OUTPUT BACKEND SELECTION
+// ═══════════════════════════════════════════════════════════════════
+// Normally exactly one of these is 1. Both at once is legal (every
+// input fires both backends) but only useful while bench-comparing.
+#define OUT_IR   1    // IR remote replay          — primary
+#define OUT_SWC  0    // resistive wired-remote     — needs a sweep first
+
+#if OUT_IR
+  #include <IRremoteESP8266.h>
+  #include <IRsend.h>
+#endif
+
 // ── Pin definitions ──────────────────────────────────────────────
-#define CTX_PIN  4    // SN65HVD230 CTX
-#define CRX_PIN  8    // SN65HVD230 CRX
-#define LED_PIN  48   // Onboard NeoPixel (Lonely Binary ESP32-S3)
+#define CTX_PIN   4    // SN65HVD230 CTX
+#define CRX_PIN   8    // SN65HVD230 CRX
+#define LED_PIN   48   // Onboard NeoPixel (Lonely Binary ESP32-S3)
+#define IR_TX_PIN 17   // IR LED (or injection line into the head unit)
 
 // ── Tunable parameters ───────────────────────────────────────────
 #define PULSE_MS     150   // LED flash duration ms
 #define KEEPALIVE_MS 20    // Fast keepalive interval ms
 #define SLOW_KA_MS   1000  // Slow keepalive interval ms (0x563)
 #define ILLUM_LEVEL  0xFD  // Backlight brightness: 0x00=off, 0xFD=full
+#define MAX_STEP     12    // clamp: max volume steps from one CAN frame
 
 // ═══════════════════════════════════════════════════════════════════
-// SWC RESISTOR LADDER OUTPUT
+// LOGICAL KEYS — shared by both output backends
+// ═══════════════════════════════════════════════════════════════════
+enum : uint8_t {
+  KEY_VOL_UP = 0,
+  KEY_VOL_DOWN,
+  KEY_MUTE,
+  KEY_NEXT,
+  KEY_PREV,
+  KEY_COUNT
+};
+// Referenced only by the boot banner, which is compiled out when no
+// output backend is selected — hence the unused attribute.
+static const char* KEY_NAME[KEY_COUNT] __attribute__((unused)) = {
+  "VOL_UP", "VOL_DOWN", "MUTE", "NEXT", "PREV"
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// IR BACKEND
+// ═══════════════════════════════════════════════════════════════════
+// Codes come from ir_capture/ir_capture.ino. Until they are pasted in,
+// every entry is 0 and the IR task silently skips it — the boot banner
+// tells you how many are still unset.
+//
+// IR_CARRIER_BYPASS: leave 0 when driving a real IR LED (the library
+// generates the 38 kHz carrier as normal). Set to 1 ONLY if you are
+// injecting into the head unit's IR receiver OUTPUT pin, which expects
+// an already-demodulated signal — there, the carrier must be off.
+// ═══════════════════════════════════════════════════════════════════
+#if OUT_IR
+
+#define IR_QUEUE_LEN      32
+#define IR_GAP_MS         40    // quiet time between consecutive frames
+#define IR_TASK_STACK     4096
+#define IR_TASK_CORE      0     // Arduino loop() runs on core 1
+#define IR_CARRIER_BYPASS 0     // 1 = injecting at the receiver pin
+
+struct IrCode {
+  decode_type_t proto;
+  uint64_t      code;
+  uint16_t      bits;
+};
+
+// ⚠ PLACEHOLDERS — run ir_capture and replace all five.
+static const IrCode IR_CODES[KEY_COUNT] = {
+  /* KEY_VOL_UP   */ { decode_type_t::NEC, 0x0, 32 },
+  /* KEY_VOL_DOWN */ { decode_type_t::NEC, 0x0, 32 },
+  /* KEY_MUTE     */ { decode_type_t::NEC, 0x0, 32 },
+  /* KEY_NEXT     */ { decode_type_t::NEC, 0x0, 32 },
+  /* KEY_PREV     */ { decode_type_t::NEC, 0x0, 32 },
+};
+
+static QueueHandle_t irQueue = nullptr;
+
+// Runs on core 0. Blocking IR work is confined here so the CAN loop on
+// core 1 keeps servicing keep-alives and inbound frames uninterrupted.
+static void irTask(void* arg) {
+  IRsend irsend(IR_TX_PIN, false, !IR_CARRIER_BYPASS);
+  irsend.begin();
+  uint8_t key;
+  for (;;) {
+    if (xQueueReceive(irQueue, &key, portMAX_DELAY) != pdTRUE) continue;
+    if (key >= KEY_COUNT) continue;
+    const IrCode& c = IR_CODES[key];
+    if (c.code == 0) continue;                 // not captured yet
+    irsend.send(c.proto, c.code, c.bits);
+    vTaskDelay(pdMS_TO_TICKS(IR_GAP_MS));
+  }
+}
+
+static void irPush(uint8_t key, uint8_t times) {
+  if (!irQueue || key >= KEY_COUNT) return;
+  while (times--) {
+    // Non-blocking send: if the queue is full we drop rather than stall
+    // the CAN loop waiting on the IR task.
+    if (xQueueSend(irQueue, &key, 0) != pdTRUE) return;
+  }
+}
+
+static uint8_t irUnsetCount() {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < KEY_COUNT; i++) if (IR_CODES[i].code == 0) n++;
+  return n;
+}
+
+#endif // OUT_IR
+
+// ═══════════════════════════════════════════════════════════════════
+// SWC RESISTOR LADDER BACKEND (fallback)
 // ═══════════════════════════════════════════════════════════════════
 // The head unit's wired-remote input is a resistance-to-ground ladder:
-// the radio holds the line up through its own internal pull-up and
-// measures the resistance you place between the line and ground. Each
-// distinct resistance = one button. This is exactly what a PAC SWI-RC
-// does internally; we just drive it from the iDrive instead of from a
-// steering wheel.
+// the radio holds the line up through its own pull-up and measures the
+// resistance you place between the line and ground.
 //
-// HOW A "PRESS" WORKS:
 //   assert  → pinMode(pin, OUTPUT); digitalWrite(pin, LOW)
-//             that leg's resistor is now tied to ground.
-//   release → pinMode(pin, INPUT)
-//             high-Z (>1 MΩ), leg effectively disconnected.
+//   release → pinMode(pin, INPUT)   (high-Z, >1 MΩ)
 //   Exactly one leg is ever asserted at a time.
 //
-// RESISTOR VALUES:
-//   Chosen from PAC's proven set (47/100/150/560/1000/1500/3900Ω),
-//   skipping the low end where the ESP32's ~30Ω output-LOW impedance
-//   would be a large error term. At 560Ω and up that 30Ω is under 6%.
-//   Every adjacent pair is separated by ≥1.4x, wider than any radio's
-//   detection window — so mis-reads are very unlikely.
-//
-// CALIBRATION:
-//   Values only need to be *stable and well separated* if the unit has
-//   an SWC "study"/"learn" screen — you teach it whatever you output.
-//   If it expects a fixed factory ladder instead, sweep: temporarily
-//   tie single resistors from the line to ground by hand and watch what
-//   the radio does, then set the table below to the values that hit.
-//   Measure each leg's true resistance pin-to-GND with a DMM while that
-//   pin is driven LOW, and record the real number here.
+// ⚠ The CP-71W has no learn mode, so these values are unverified. The
+//   real map must be found by sweeping ~0–5kΩ and noting what hits.
 // ═══════════════════════════════════════════════════════════════════
+#if OUT_SWC
 
-#define SWC_ENABLE    1     // set 0 to build with CAN decode only
 #define SWC_HOLD_MS   140   // how long the resistance is asserted
 #define SWC_GAP_MS    60    // release gap between consecutive presses
-#define SWC_QUEUE_LEN 24    // pending presses (a fast spin queues many)
-#define SWC_MAX_STEP  12    // clamp: max volume steps from one frame
+#define SWC_QUEUE_LEN 24
+#define SWC_NONE      0xFF
 
-enum : uint8_t {
-  SWC_VOL_UP = 0,
-  SWC_VOL_DOWN,
-  SWC_MUTE,
-  SWC_NEXT,
-  SWC_PREV,
-  SWC_COUNT
-};
-#define SWC_NONE 0xFF
+struct SwcLeg { uint8_t pin; uint16_t ohms; };
 
-struct SwcLeg {
-  uint8_t     pin;    // ESP32-S3 GPIO driving this leg
-  uint16_t    ohms;   // resistor fitted in series with that pin
-  const char* label;
-};
-
-// Pins avoid: 4/8 (CAN), 48 (NeoPixel), 19/20 (USB),
+// Pins avoid: 4/8 (CAN), 17 (IR), 48 (NeoPixel), 19/20 (USB),
 //             26-37 (flash + OPI PSRAM), 0/45/46 (strapping), 43/44 (UART0)
-static const SwcLeg SWC_MAP[SWC_COUNT] = {
-  {  5,  560, "VOL_UP"   },
-  {  6, 1000, "VOL_DOWN" },
-  {  7, 1500, "MUTE"     },
-  { 15, 2200, "NEXT"     },
-  { 16, 3900, "PREV"     },
+static const SwcLeg SWC_MAP[KEY_COUNT] = {
+  /* KEY_VOL_UP   */ {  5,  560 },
+  /* KEY_VOL_DOWN */ {  6, 1000 },
+  /* KEY_MUTE     */ {  7, 1500 },
+  /* KEY_NEXT     */ { 15, 2200 },
+  /* KEY_PREV     */ { 16, 3900 },
 };
 
 static uint8_t  swcQueue[SWC_QUEUE_LEN];
-static uint8_t  swcHead   = 0;          // write index
-static uint8_t  swcTail   = 0;          // read index
-static uint8_t  swcActive = SWC_NONE;   // leg currently asserted
-static uint32_t swcNextAt = 0;          // release deadline, or gap end
+static uint8_t  swcHead   = 0;
+static uint8_t  swcTail   = 0;
+static uint8_t  swcActive = SWC_NONE;
+static uint32_t swcNextAt = 0;
+
+static void swcInit() {
+  for (uint8_t i = 0; i < KEY_COUNT; i++) pinMode(SWC_MAP[i].pin, INPUT);
+  swcActive = SWC_NONE;
+  swcHead = swcTail = 0;
+  swcNextAt = 0;
+}
+
+// Drops on overflow rather than overwriting — a corrupted queue must
+// never strand a leg asserted, which would read as a held button.
+static void swcPush(uint8_t key, uint8_t times) {
+  if (key >= KEY_COUNT) return;
+  while (times--) {
+    uint8_t next = (uint8_t)((swcHead + 1) % SWC_QUEUE_LEN);
+    if (next == swcTail) return;          // full
+    swcQueue[swcHead] = key;
+    swcHead = next;
+  }
+}
+
+static void swcService() {
+  uint32_t now = millis();
+
+  if (swcActive != SWC_NONE) {
+    if ((int32_t)(now - swcNextAt) >= 0) {
+      pinMode(SWC_MAP[swcActive].pin, INPUT);   // high-Z = released
+      swcActive = SWC_NONE;
+      swcNextAt = now + SWC_GAP_MS;             // inter-press gap
+    }
+    return;
+  }
+
+  if ((int32_t)(now - swcNextAt) < 0) return;   // still in the gap
+  if (swcHead == swcTail) return;               // nothing queued
+
+  uint8_t key = swcQueue[swcTail];
+  swcTail = (uint8_t)((swcTail + 1) % SWC_QUEUE_LEN);
+
+  pinMode(SWC_MAP[key].pin, OUTPUT);
+  digitalWrite(SWC_MAP[key].pin, LOW);          // resistor → GND
+  swcActive = key;
+  swcNextAt = now + SWC_HOLD_MS;
+}
+
+#endif // OUT_SWC
+
+// ── Unified output dispatch ───────────────────────────────────────
+static void outPush(uint8_t key, uint8_t times) {
+#if OUT_IR
+  irPush(key, times);
+#endif
+#if OUT_SWC
+  swcPush(key, times);
+#endif
+#if !OUT_IR && !OUT_SWC
+  (void)key; (void)times;
+#endif
+}
 
 // ── Globals ──────────────────────────────────────────────────────
 Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -186,62 +350,7 @@ uint8_t lastB5 = 0x00;
 uint8_t lastB6 = 0xC0;
 uint8_t lastB7 = 0xF8;
 
-// ── SWC: release every leg to high-Z, drop anything queued ────────
-void swcInit() {
-#if SWC_ENABLE
-  for (uint8_t i = 0; i < SWC_COUNT; i++) pinMode(SWC_MAP[i].pin, INPUT);
-#endif
-  swcActive = SWC_NONE;
-  swcHead = swcTail = 0;
-  swcNextAt = 0;
-}
-
-// ── SWC: queue `times` presses of one key ─────────────────────────
-// Drops on overflow rather than overwriting — a corrupted queue must
-// never strand a leg asserted, which would read as a held button.
-void swcPush(uint8_t key, uint8_t times) {
-#if SWC_ENABLE
-  if (key >= SWC_COUNT) return;
-  while (times--) {
-    uint8_t next = (uint8_t)((swcHead + 1) % SWC_QUEUE_LEN);
-    if (next == swcTail) return;          // full
-    swcQueue[swcHead] = key;
-    swcHead = next;
-  }
-#else
-  (void)key; (void)times;
-#endif
-}
-
-// ── SWC: non-blocking press state machine — call every loop ───────
-void swcService() {
-#if SWC_ENABLE
-  uint32_t now = millis();
-
-  // Currently asserting a leg — hold until its deadline, then release.
-  if (swcActive != SWC_NONE) {
-    if ((int32_t)(now - swcNextAt) >= 0) {
-      pinMode(SWC_MAP[swcActive].pin, INPUT);   // high-Z = released
-      swcActive = SWC_NONE;
-      swcNextAt = now + SWC_GAP_MS;             // enforce inter-press gap
-    }
-    return;
-  }
-
-  if ((int32_t)(now - swcNextAt) < 0) return;   // still in the gap
-  if (swcHead == swcTail) return;               // nothing queued
-
-  uint8_t key = swcQueue[swcTail];
-  swcTail = (uint8_t)((swcTail + 1) % SWC_QUEUE_LEN);
-
-  pinMode(SWC_MAP[key].pin, OUTPUT);
-  digitalWrite(SWC_MAP[key].pin, LOW);          // resistor → GND
-  swcActive = key;
-  swcNextAt = now + SWC_HOLD_MS;
-#endif
-}
-
-// ── LED helper — non-blocking ─────────────────────────────────────
+// ── LED helpers — non-blocking in the event path ──────────────────
 void flashLED(uint8_t r, uint8_t g, uint8_t b) {
   led.setPixelColor(0, led.Color(r, g, b));
   led.show();
@@ -281,9 +390,8 @@ void sendFrame(uint16_t id, uint8_t len, uint8_t* data) {
 }
 
 // ── Button/input event handler ────────────────────────────────────
-// This is your integration point. `count` is the number of repeats —
-// it is >1 only for knob rotation, where one CAN frame can carry
-// several detents. Everything else passes 1.
+// This is your integration point. `count` is >1 only for knob rotation,
+// where one CAN frame can carry several detents.
 void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
                    uint8_t count = 1) {
   if (count > 1) Serial.printf("PRESS: %s x%u\n", name, count);
@@ -291,11 +399,11 @@ void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
   flashLED(r, g, b);
 
   // ── Head unit control ────────────────────────────────────────
-  if      (!strcmp(name, "KNOB_CW"))    swcPush(SWC_VOL_UP,   count);
-  else if (!strcmp(name, "KNOB_CCW"))   swcPush(SWC_VOL_DOWN, count);
-  else if (!strcmp(name, "KNOB_PRESS")) swcPush(SWC_MUTE,     1);
-  else if (!strcmp(name, "RIGHT"))      swcPush(SWC_NEXT,     1);
-  else if (!strcmp(name, "LEFT"))       swcPush(SWC_PREV,     1);
+  if      (!strcmp(name, "KNOB_CW"))    outPush(KEY_VOL_UP,   count);
+  else if (!strcmp(name, "KNOB_CCW"))   outPush(KEY_VOL_DOWN, count);
+  else if (!strcmp(name, "KNOB_PRESS")) outPush(KEY_MUTE,     1);
+  else if (!strcmp(name, "RIGHT"))      outPush(KEY_NEXT,     1);
+  else if (!strcmp(name, "LEFT"))       outPush(KEY_PREV,     1);
 
   // Unmapped so far: UP, DOWN, MENU, BACK, OPTION, COM, MEDIA, NAV, MAP
 }
@@ -411,7 +519,7 @@ void handleFrame(twai_message_t& msg) {
     int8_t delta = (int8_t)(b1 - lastB1);
     if (delta != 0) {
       int16_t mag = delta > 0 ? (int16_t)delta : -(int16_t)delta;
-      if (mag > SWC_MAX_STEP) mag = SWC_MAX_STEP;
+      if (mag > MAX_STEP) mag = MAX_STEP;
       if (delta > 0) onButtonPress("KNOB_CW",  0,   255, 0, (uint8_t)mag);
       else           onButtonPress("KNOB_CCW", 255, 0,   0, (uint8_t)mag);
     }
@@ -431,7 +539,15 @@ void handleFrame(twai_message_t& msg) {
 void setup() {
   Serial.begin(115200);
 
+#if OUT_SWC
   swcInit();   // all ladder legs high-Z before anything else
+#endif
+
+#if OUT_IR
+  irQueue = xQueueCreate(IR_QUEUE_LEN, sizeof(uint8_t));
+  xTaskCreatePinnedToCore(irTask, "irTask", IR_TASK_STACK,
+                          nullptr, 1, nullptr, IR_TASK_CORE);
+#endif
 
   led.begin();
   led.setBrightness(40);
@@ -480,19 +596,41 @@ void setup() {
     }
   }
 
-  // Discard anything the wake loop queued — no phantom volume on boot.
+  // Discard anything the wake loop queued — no phantom output on boot.
+#if OUT_SWC
   swcInit();
+#endif
+#if OUT_IR
+  xQueueReset(irQueue);
+#endif
 
   blinkBlocking(255, 255, 255); // white = ready
   Serial.println("iDrive ready — all 14 inputs mapped");
-#if SWC_ENABLE
-  Serial.println("SWC ladder ACTIVE:");
-  for (uint8_t i = 0; i < SWC_COUNT; i++)
-    Serial.printf("  %-9s GPIO%-2u  %u ohm\n",
-                  SWC_MAP[i].label, SWC_MAP[i].pin, SWC_MAP[i].ohms);
-#else
-  Serial.println("SWC output DISABLED (SWC_ENABLE=0) — decode only");
+
+#if OUT_IR
+  Serial.printf("IR output ACTIVE on GPIO%u (task on core %u)%s\n",
+                IR_TX_PIN, IR_TASK_CORE,
+                IR_CARRIER_BYPASS ? ", carrier BYPASSED" : "");
+  uint8_t unset = irUnsetCount();
+  if (unset) {
+    Serial.printf("  ⚠ %u of %u IR codes are still placeholders — "
+                  "run ir_capture and paste them in.\n", unset, KEY_COUNT);
+    for (uint8_t i = 0; i < KEY_COUNT; i++)
+      if (IR_CODES[i].code == 0) Serial.printf("      unset: %s\n", KEY_NAME[i]);
+  } else {
+    Serial.println("  all 5 IR codes populated");
+  }
 #endif
+#if OUT_SWC
+  Serial.println("SWC ladder ACTIVE (values UNVERIFIED — no learn mode on this radio):");
+  for (uint8_t i = 0; i < KEY_COUNT; i++)
+    Serial.printf("  %-9s GPIO%-2u  %u ohm\n",
+                  KEY_NAME[i], SWC_MAP[i].pin, SWC_MAP[i].ohms);
+#endif
+#if !OUT_IR && !OUT_SWC
+  Serial.println("No output backend compiled in — decode only.");
+#endif
+
   Serial.println("Waiting for 0x5E7 init handshake...");
 }
 
@@ -513,6 +651,8 @@ void loop() {
     handleFrame(msg);
   }
 
+#if OUT_SWC
   swcService();   // advance the ladder press state machine
+#endif
   ledService();   // turn the NeoPixel back off when its time is up
 }
