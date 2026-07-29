@@ -115,6 +115,27 @@ trailing seconds behind the knob). The fix, once the radio is available to test
 against, is NEC **hold-repeat** frames: a repeat is ~11 ms versus ~67 ms, so holding
 ramps roughly 6x faster. The captured remote does emit clean repeats.
 
+## ⏭️ NEXT UP — wire the UART to the Pi and test
+**Mark asked to be reminded of this.** The mode layer emits NDJSON but nothing
+consumes it yet.
+
+Physical plan: ESP32 + SN65HVD230 mount **inside the HVAC module enclosure**, so the
+UART run to the Pi is inches and the CAN leads stay short to the iDrive.
+
+    ESP32 TX GPIO43 ──→ Pi GPIO15 / RXD (pin 10)
+    ESP32 RX GPIO44 ←── Pi GPIO14 / TXD (pin  8)
+    ESP32 GND       ─── Pi GND         (pin  6)     ← mandatory
+    optional: Pi 5V (pin 2) → ESP32 VIN, keeps USB free for flashing
+
+Pi config: `raspi-config` → Serial Port → login shell **No**, hardware **Yes**. Then
+in `/boot/firmware/config.txt` add `enable_uart=1` and **`dtoverlay=disable-bt`** —
+without that, `/dev/serial0` is the mini-UART whose baud tracks the VPU core clock and
+corrupts under load, which the 10 Hz control loop will absolutely produce. Verify
+`/dev/serial0` points at `ttyAMA0`, not `ttyS0`.
+
+Backend: feed events into the **same handler the dashboard commands use**, so the
+touchscreen updates for free and there is no second state path.
+
 ## Open next steps
 - **In-car test.** Does the CP-71W respond to the LED, and at what range? If it works
   close up but not from the dash, that is drive current, not code — put the LED behind

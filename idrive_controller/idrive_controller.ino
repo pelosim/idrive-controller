@@ -253,6 +253,7 @@ enum : uint8_t {
   ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_LIGHT_TOGGLE,
   ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN,
   ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_GAUGE_SELECT,
+  ACT_AUX_SWAP,           // global: round screen clock <-> g-meter
   ACT_COUNT
 };
 
@@ -265,6 +266,7 @@ static const char* ACT_NAME[ACT_COUNT] = {
   "LIGHT_SCENE_PREV", "LIGHT_SCENE_NEXT", "LIGHT_TOGGLE",
   "GAUGE_SCROLL_UP", "GAUGE_SCROLL_DOWN",
   "GAUGE_PAGE_PREV", "GAUGE_PAGE_NEXT", "GAUGE_SELECT",
+  "AUX_SWAP",
 };
 
 // What each physical input does in each mode.
@@ -658,11 +660,16 @@ static void modeService() {
 static void dispatchAction(uint8_t act, uint8_t count) {
   if (act == ACT_NONE || act >= ACT_COUNT) return;
   modeTouchedAt = millis();          // any real action keeps the mode alive
+
   if (act >= ACT_VOL_UP && act <= ACT_PREV) {
     outPush((uint8_t)(act - ACT_VOL_UP), count);
-  } else {
-    linkEmit(ACT_NAME[act], count);
   }
+
+  // EVERY action is reported on the link, MEDIA included. The head unit is
+  // driven by IR and the Pi plays no part in that — but the Pi still needs
+  // to see volume and track events to animate the on-screen knob mirror.
+  // Reporting is not routing: the IR path above is what actually acts.
+  linkEmit(ACT_NAME[act], count);
 }
 
 void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
@@ -677,6 +684,16 @@ void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
   else if (!strcmp(name, "MAP"))   { modeSet(MODE_LIGHT); return; }
   else if (!strcmp(name, "MENU"))  { modeSet(MODE_GAUGE); return; }
   else if (!strcmp(name, "BACK"))  { modeSet(MODE_MEDIA); return; }
+
+  // ── Global actions — work from ANY mode ───────────────────────
+  // Swapping the round aux screen between the Sport Chrono clock and the
+  // G-meter is a thing you want on one press regardless of what the knob
+  // is currently bound to, so it deliberately bypasses the mode map.
+  if (!strcmp(name, "OPTION")) {
+    flashLED(0x5C, 0xB8, 0xFF);      // ice blue, matches the aux screen
+    dispatchAction(ACT_AUX_SWAP, 1);
+    return;
+  }
 
   flashLED(r, g, b);
 
