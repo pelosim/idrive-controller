@@ -1,15 +1,14 @@
+
 # Arduino build artifacts
-build/
-*.elf
+# IDE
+# macOS
 *.bin
+*.code-workspace
+*.elf
 *.hex
 *.map
-
-# macOS
-.DS_Store
 .AppleDouble
+.DS_Store
 .LSOverride
-
-# IDE
 .vscode/
-*.code-workspace
+build/

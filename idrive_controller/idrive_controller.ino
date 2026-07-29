@@ -1,19 +1,19 @@
 // ═══════════════════════════════════════════════════════════════════
 // BMW F-Series iDrive — Universal CAN Input Controller
 // Hardware: Lonely Binary ESP32-S3 + SN65HVD230 CAN transceiver
-// Version:  1.0.0
+// Version:  1.1.0
 // Author:   Mark Pelosi
 // License:  MIT
-// Repo:     https://github.com/YOUR_USERNAME/idrive-controller
+// Repo:     https://github.com/pelosim/idrive-controller
 // ═══════════════════════════════════════════════════════════════════
 //
 // DESCRIPTION:
 //   Decodes all inputs from a BMW F-Series iDrive controller (Preh,
-//   part #6582 6829079-03) over CAN bus and exposes them as digital
-//   events for any downstream use — GPIO, SWC voltage output, BLE
-//   HID, MQTT, or any other output you want to wire in.
+//   part #6582 6829079-03) over CAN bus and drives an aftermarket head
+//   unit's wired-remote (SWC) input via a switched resistor ladder.
+//   Default target: Power Acoustik CP-71W.
 //
-// WIRING:
+// WIRING — CAN side:
 //   iDrive Green        → SN65HVD230 CANH
 //   iDrive Green/Orange → SN65HVD230 CANL
 //   120Ω resistor       → CANH to CANL  ← mandatory, crash without it
@@ -22,7 +22,20 @@
 //   SN65HVD230 CRX      → ESP32 GPIO8
 //   SN65HVD230 CTX      → ESP32 GPIO4
 //   12V bench/car GND   → Common GND    ← floating ground = no data
-//   SWC output (future) → GPIO2 → [10kΩ] → SWC wire → [10µF] → GND
+//
+// WIRING — SWC ladder output (see SWC section below for full notes):
+//   GPIO5  ─[560Ω] ─┐
+//   GPIO6  ─[1.0kΩ]─┤
+//   GPIO7  ─[1.5kΩ]─┼── head unit wired-remote line (3.5mm TIP,
+//   GPIO15 ─[2.2kΩ]─┤    or the Blue/Yellow "W/R"/"REM" wire)
+//   GPIO16 ─[3.9kΩ]─┘
+//   Head unit remote GND (3.5mm SLEEVE) → Common GND
+//
+//   ⚠ BEFORE WIRING: measure the head unit's remote line to ground with
+//     nothing connected. If it sits above 3.3V (many units pull up to
+//     5V), do NOT drive the GPIOs into it directly — put a 2N7000 per
+//     leg (gate←GPIO, drain→resistor→line, source→GND) so the ESP32
+//     never touches the line. See the SWC section for detail.
 //
 // ARDUINO IDE SETTINGS:
 //   Board:           ESP32S3 Dev Module
@@ -59,10 +72,16 @@
 //   - Directional pad may need knob press first on bench
 //     (expected to work without in car)
 //
-// NEXT STEPS:
-//   - Capture 0x273 reply on live BMW to complete auto-wake
-//   - Add SWC output in onButtonPress() for head unit control
-//   - Wire RC filter: GPIO2 → [10kΩ] → SWC wire → [10µF] → GND
+// CHANGES IN 1.1.0:
+//   - SWC output implemented as a switched RESISTOR LADDER, replacing
+//     the planned PWM+RC voltage output (which cannot work — the head
+//     unit measures resistance against its own pull-up, so a 10k/10µF
+//     source is both too high-impedance and far too slow).
+//   - LED flash and SWC key presses are now fully non-blocking. The old
+//     delay(150) inside onButtonPress() stalled the 20 ms keep-alives
+//     and dropped inbound frames on every press.
+//   - Knob rotation now emits one volume step PER DETENT. Previously a
+//     multi-count delta fired a single event, losing most of a fast spin.
 // ═══════════════════════════════════════════════════════════════════
 
 #include "driver/twai.h"
@@ -79,12 +98,85 @@
 #define SLOW_KA_MS   1000  // Slow keepalive interval ms (0x563)
 #define ILLUM_LEVEL  0xFD  // Backlight brightness: 0x00=off, 0xFD=full
 
+// ═══════════════════════════════════════════════════════════════════
+// SWC RESISTOR LADDER OUTPUT
+// ═══════════════════════════════════════════════════════════════════
+// The head unit's wired-remote input is a resistance-to-ground ladder:
+// the radio holds the line up through its own internal pull-up and
+// measures the resistance you place between the line and ground. Each
+// distinct resistance = one button. This is exactly what a PAC SWI-RC
+// does internally; we just drive it from the iDrive instead of from a
+// steering wheel.
+//
+// HOW A "PRESS" WORKS:
+//   assert  → pinMode(pin, OUTPUT); digitalWrite(pin, LOW)
+//             that leg's resistor is now tied to ground.
+//   release → pinMode(pin, INPUT)
+//             high-Z (>1 MΩ), leg effectively disconnected.
+//   Exactly one leg is ever asserted at a time.
+//
+// RESISTOR VALUES:
+//   Chosen from PAC's proven set (47/100/150/560/1000/1500/3900Ω),
+//   skipping the low end where the ESP32's ~30Ω output-LOW impedance
+//   would be a large error term. At 560Ω and up that 30Ω is under 6%.
+//   Every adjacent pair is separated by ≥1.4x, wider than any radio's
+//   detection window — so mis-reads are very unlikely.
+//
+// CALIBRATION:
+//   Values only need to be *stable and well separated* if the unit has
+//   an SWC "study"/"learn" screen — you teach it whatever you output.
+//   If it expects a fixed factory ladder instead, sweep: temporarily
+//   tie single resistors from the line to ground by hand and watch what
+//   the radio does, then set the table below to the values that hit.
+//   Measure each leg's true resistance pin-to-GND with a DMM while that
+//   pin is driven LOW, and record the real number here.
+// ═══════════════════════════════════════════════════════════════════
+
+#define SWC_ENABLE    1     // set 0 to build with CAN decode only
+#define SWC_HOLD_MS   140   // how long the resistance is asserted
+#define SWC_GAP_MS    60    // release gap between consecutive presses
+#define SWC_QUEUE_LEN 24    // pending presses (a fast spin queues many)
+#define SWC_MAX_STEP  12    // clamp: max volume steps from one frame
+
+enum : uint8_t {
+  SWC_VOL_UP = 0,
+  SWC_VOL_DOWN,
+  SWC_MUTE,
+  SWC_NEXT,
+  SWC_PREV,
+  SWC_COUNT
+};
+#define SWC_NONE 0xFF
+
+struct SwcLeg {
+  uint8_t     pin;    // ESP32-S3 GPIO driving this leg
+  uint16_t    ohms;   // resistor fitted in series with that pin
+  const char* label;
+};
+
+// Pins avoid: 4/8 (CAN), 48 (NeoPixel), 19/20 (USB),
+//             26-37 (flash + OPI PSRAM), 0/45/46 (strapping), 43/44 (UART0)
+static const SwcLeg SWC_MAP[SWC_COUNT] = {
+  {  5,  560, "VOL_UP"   },
+  {  6, 1000, "VOL_DOWN" },
+  {  7, 1500, "MUTE"     },
+  { 15, 2200, "NEXT"     },
+  { 16, 3900, "PREV"     },
+};
+
+static uint8_t  swcQueue[SWC_QUEUE_LEN];
+static uint8_t  swcHead   = 0;          // write index
+static uint8_t  swcTail   = 0;          // read index
+static uint8_t  swcActive = SWC_NONE;   // leg currently asserted
+static uint32_t swcNextAt = 0;          // release deadline, or gap end
+
 // ── Globals ──────────────────────────────────────────────────────
 Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 unsigned long lastKeepalive = 0;
 unsigned long lastSlowKA    = 0;
 bool          initialized   = false;
+static uint32_t ledOffAt    = 0;   // 0 = LED already off
 
 // Previous frame state for edge detection
 uint8_t lastB1 = 0xFF;
@@ -94,8 +186,79 @@ uint8_t lastB5 = 0x00;
 uint8_t lastB6 = 0xC0;
 uint8_t lastB7 = 0xF8;
 
-// ── LED helper ────────────────────────────────────────────────────
+// ── SWC: release every leg to high-Z, drop anything queued ────────
+void swcInit() {
+#if SWC_ENABLE
+  for (uint8_t i = 0; i < SWC_COUNT; i++) pinMode(SWC_MAP[i].pin, INPUT);
+#endif
+  swcActive = SWC_NONE;
+  swcHead = swcTail = 0;
+  swcNextAt = 0;
+}
+
+// ── SWC: queue `times` presses of one key ─────────────────────────
+// Drops on overflow rather than overwriting — a corrupted queue must
+// never strand a leg asserted, which would read as a held button.
+void swcPush(uint8_t key, uint8_t times) {
+#if SWC_ENABLE
+  if (key >= SWC_COUNT) return;
+  while (times--) {
+    uint8_t next = (uint8_t)((swcHead + 1) % SWC_QUEUE_LEN);
+    if (next == swcTail) return;          // full
+    swcQueue[swcHead] = key;
+    swcHead = next;
+  }
+#else
+  (void)key; (void)times;
+#endif
+}
+
+// ── SWC: non-blocking press state machine — call every loop ───────
+void swcService() {
+#if SWC_ENABLE
+  uint32_t now = millis();
+
+  // Currently asserting a leg — hold until its deadline, then release.
+  if (swcActive != SWC_NONE) {
+    if ((int32_t)(now - swcNextAt) >= 0) {
+      pinMode(SWC_MAP[swcActive].pin, INPUT);   // high-Z = released
+      swcActive = SWC_NONE;
+      swcNextAt = now + SWC_GAP_MS;             // enforce inter-press gap
+    }
+    return;
+  }
+
+  if ((int32_t)(now - swcNextAt) < 0) return;   // still in the gap
+  if (swcHead == swcTail) return;               // nothing queued
+
+  uint8_t key = swcQueue[swcTail];
+  swcTail = (uint8_t)((swcTail + 1) % SWC_QUEUE_LEN);
+
+  pinMode(SWC_MAP[key].pin, OUTPUT);
+  digitalWrite(SWC_MAP[key].pin, LOW);          // resistor → GND
+  swcActive = key;
+  swcNextAt = now + SWC_HOLD_MS;
+#endif
+}
+
+// ── LED helper — non-blocking ─────────────────────────────────────
 void flashLED(uint8_t r, uint8_t g, uint8_t b) {
+  led.setPixelColor(0, led.Color(r, g, b));
+  led.show();
+  ledOffAt = millis() + PULSE_MS;
+  if (!ledOffAt) ledOffAt = 1;   // never land on the "off" sentinel
+}
+
+void ledService() {
+  if (ledOffAt && (int32_t)(millis() - ledOffAt) >= 0) {
+    led.setPixelColor(0, led.Color(0, 0, 0));
+    led.show();
+    ledOffAt = 0;
+  }
+}
+
+// Blocking blink — setup() only, where stalling is harmless.
+void blinkBlocking(uint8_t r, uint8_t g, uint8_t b) {
   led.setPixelColor(0, led.Color(r, g, b));
   led.show();
   delay(PULSE_MS);
@@ -118,43 +281,49 @@ void sendFrame(uint16_t id, uint8_t len, uint8_t* data) {
 }
 
 // ── Button/input event handler ────────────────────────────────────
-// This is your integration point — add your own output logic here.
-// Examples:
-//   digitalWrite(somePin, HIGH);   // GPIO output
-//   outputSWC(duty, holdMs);       // SWC voltage for head unit
-//   bleKeyboard.press(KEY_MEDIA_NEXT_TRACK);  // BLE HID
-void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b) {
-  Serial.printf("PRESS: %s\n", name);
+// This is your integration point. `count` is the number of repeats —
+// it is >1 only for knob rotation, where one CAN frame can carry
+// several detents. Everything else passes 1.
+void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
+                   uint8_t count = 1) {
+  if (count > 1) Serial.printf("PRESS: %s x%u\n", name, count);
+  else           Serial.printf("PRESS: %s\n", name);
   flashLED(r, g, b);
 
-  // ── ADD YOUR OUTPUT LOGIC BELOW ──────────────────────────────
-  // if (strcmp(name, "KNOB_CW") == 0)  { /* volume up */ }
-  // if (strcmp(name, "KNOB_CCW") == 0) { /* volume down */ }
-  // if (strcmp(name, "MENU") == 0)     { /* menu */ }
-  // ... etc
+  // ── Head unit control ────────────────────────────────────────
+  if      (!strcmp(name, "KNOB_CW"))    swcPush(SWC_VOL_UP,   count);
+  else if (!strcmp(name, "KNOB_CCW"))   swcPush(SWC_VOL_DOWN, count);
+  else if (!strcmp(name, "KNOB_PRESS")) swcPush(SWC_MUTE,     1);
+  else if (!strcmp(name, "RIGHT"))      swcPush(SWC_NEXT,     1);
+  else if (!strcmp(name, "LEFT"))       swcPush(SWC_PREV,     1);
+
+  // Unmapped so far: UP, DOWN, MENU, BACK, OPTION, COM, MEDIA, NAV, MAP
 }
 
 // ── Fast keepalive — send every KEEPALIVE_MS ─────────────────────
+// No inter-frame delays: the TWAI TX queue (raised to 10 in setup)
+// absorbs the burst. The old delay(1) per frame burned 5 ms of every
+// 20 ms cycle and blocked reception for that whole window.
 void sendKeepalive() {
   // CAS ignition frame — signals key-on to iDrive
   uint8_t cas[8]   = {0x45,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
-  sendFrame(0x0AA, 8, cas); delay(1);
+  sendFrame(0x0AA, 8, cas);
 
   // KOMBI network alive — signals instrument cluster present
   uint8_t kombi[8] = {0x45,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
-  sendFrame(0x130, 8, kombi); delay(1);
+  sendFrame(0x130, 8, kombi);
 
   // BMW NM alive — byte1=0x02=ALIVE (0xFF=sleep, never send)
   uint8_t nm[8]    = {0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00};
-  sendFrame(0x440, 8, nm); delay(1);
+  sendFrame(0x440, 8, nm);
 
   // Secondary heartbeat
   uint8_t hb[8]    = {0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00};
-  sendFrame(0x560, 8, hb); delay(1);
+  sendFrame(0x560, 8, hb);
 
   // Illumination — adjust ILLUM_LEVEL to change brightness
   uint8_t illum[8] = {ILLUM_LEVEL,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
-  sendFrame(0x202, 2, illum); delay(1);
+  sendFrame(0x202, 2, illum);
 }
 
 // ── Slow keepalive — send every SLOW_KA_MS ───────────────────────
@@ -174,7 +343,6 @@ void handle5E7(twai_message_t& msg) {
   if (msg.data[4] == 0x01 && !initialized) {
     initialized = true;
     Serial.println("iDrive FULLY INITIALIZED — all inputs active");
-    flashLED(0, 255, 0); delay(100);
     flashLED(0, 255, 0);
   }
 }
@@ -235,15 +403,17 @@ void handleFrame(twai_message_t& msg) {
   if (b7diff & 0x01 && b7 & 0x01) onButtonPress("MAP",    255, 200, 0  ); // gold
 
   // ── Knob rotation ─────────────────────────────────────────────
-  // int8_t signed cast handles byte wraparound (e.g. 0xFF→0x01 = +2 not -254)
+  // int8_t signed cast handles byte wraparound (e.g. 0xFF→0x01 = +2 not -254).
+  // The magnitude is the detent count for this frame — emit that many
+  // volume steps, not one. Promote to int16_t before negating so that
+  // delta == -128 cannot overflow, then clamp against glitch frames.
   if (b2 == 0x80 && lastB1 != 0xFF) {
     int8_t delta = (int8_t)(b1 - lastB1);
-    if (delta > 0) {
-      onButtonPress("KNOB_CW",  0,   255, 0  ); // green
-      Serial.printf("KNOB_CW  %d click(s)\n", delta);
-    } else if (delta < 0) {
-      onButtonPress("KNOB_CCW", 255, 0,   0  ); // red
-      Serial.printf("KNOB_CCW %d click(s)\n", -delta);
+    if (delta != 0) {
+      int16_t mag = delta > 0 ? (int16_t)delta : -(int16_t)delta;
+      if (mag > SWC_MAX_STEP) mag = SWC_MAX_STEP;
+      if (delta > 0) onButtonPress("KNOB_CW",  0,   255, 0, (uint8_t)mag);
+      else           onButtonPress("KNOB_CCW", 255, 0,   0, (uint8_t)mag);
     }
   }
 
@@ -261,6 +431,8 @@ void handleFrame(twai_message_t& msg) {
 void setup() {
   Serial.begin(115200);
 
+  swcInit();   // all ladder legs high-Z before anything else
+
   led.begin();
   led.setBrightness(40);
   led.setPixelColor(0, led.Color(0, 0, 0));
@@ -271,6 +443,7 @@ void setup() {
     TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CTX_PIN,
                                 (gpio_num_t)CRX_PIN,
                                 TWAI_MODE_NORMAL);
+  g_config.tx_queue_len = 10;   // absorb the 5-frame keepalive burst
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
@@ -307,8 +480,19 @@ void setup() {
     }
   }
 
-  flashLED(255, 255, 255); // white = ready
+  // Discard anything the wake loop queued — no phantom volume on boot.
+  swcInit();
+
+  blinkBlocking(255, 255, 255); // white = ready
   Serial.println("iDrive ready — all 14 inputs mapped");
+#if SWC_ENABLE
+  Serial.println("SWC ladder ACTIVE:");
+  for (uint8_t i = 0; i < SWC_COUNT; i++)
+    Serial.printf("  %-9s GPIO%-2u  %u ohm\n",
+                  SWC_MAP[i].label, SWC_MAP[i].pin, SWC_MAP[i].ohms);
+#else
+  Serial.println("SWC output DISABLED (SWC_ENABLE=0) — decode only");
+#endif
   Serial.println("Waiting for 0x5E7 init handshake...");
 }
 
@@ -328,4 +512,7 @@ void loop() {
   if (twai_receive(&msg, pdMS_TO_TICKS(10)) == ESP_OK) {
     handleFrame(msg);
   }
+
+  swcService();   // advance the ladder press state machine
+  ledService();   // turn the NeoPixel back off when its time is up
 }

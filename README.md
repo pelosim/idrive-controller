@@ -1,6 +1,6 @@
 # BMW F-Series iDrive — Universal CAN Input Controller
 
-Decode all inputs from a BMW F-Series iDrive controller over CAN bus using an ESP32-S3, and route them to any output you want — GPIO, SWC voltage, BLE HID, MQTT, or anything else.
+Decode all inputs from a BMW F-Series iDrive controller over CAN bus using an ESP32-S3, and route them to any output you want — an aftermarket head unit's SWC resistor ladder (implemented), GPIO, BLE HID, MQTT, or anything else.
 
 ---
 
@@ -12,6 +12,8 @@ Decode all inputs from a BMW F-Series iDrive controller over CAN bus using an ES
 | CAN Transceiver | SN65HVD230 breakout (3.3V native — do NOT use MCP2551) |
 | iDrive Controller | BMW F-Series Preh, part #6582 6829079-03 |
 | CAN Termination | 120Ω resistor across CANH/CANL — mandatory |
+| Head Unit | Power Acoustik CP-71W (resistive wired-remote input) |
+| SWC Ladder | 560Ω, 1.0kΩ, 1.5kΩ, 2.2kΩ, 3.9kΩ — one per function |
 | Power | 12V bench supply or car battery |
 
 ---
@@ -89,50 +91,92 @@ All inputs arrive on CAN ID `0x25B` at 500 kbps.
 
 ---
 
-## Adding Your Own Output
+## Head Unit Control — SWC Resistor Ladder
 
-All button events flow through `onButtonPress()`. Add your output logic there:
+Implemented as of 1.1.0. Target: **Power Acoustik CP-71W**.
+
+### How it works
+
+An aftermarket head unit's wired-remote input is a **resistance-to-ground ladder**.
+The radio holds the line up through its own internal pull-up and measures the
+resistance you place between that line and ground; each distinct resistance is one
+button. A PAC SWI-RC is nothing more than this, with a CAN decoder in front — so we
+skip the box and drive the ladder from the iDrive directly.
+
+> ⚠️ **Do not use a PWM + RC filter to make a voltage** (the approach sketched in
+> 1.0.0). It cannot work: a 10kΩ source impedance is the same order as the radio's
+> own pull-up, so the node voltage becomes an unpredictable three-way divider that
+> drifts with the unit's reference — and 10kΩ × 10µF is a 100 ms time constant,
+> far too slow to step volume. Present **resistance**, not voltage.
+
+### Wiring
+
+```
+GPIO5  ─[560Ω] ─┐
+GPIO6  ─[1.0kΩ]─┤
+GPIO7  ─[1.5kΩ]─┼── head unit wired-remote line
+GPIO15 ─[2.2kΩ]─┤   (3.5mm TIP, or the Blue/Yellow "W/R" / "REM" wire)
+GPIO16 ─[3.9kΩ]─┘
+Head unit remote GND (3.5mm SLEEVE) → Common GND
+```
+
+A "press" is `pinMode(pin, OUTPUT); digitalWrite(pin, LOW)` — that leg's resistor is
+tied to ground. Release is `pinMode(pin, INPUT)` — high-Z, leg disconnected. Exactly
+one leg is ever asserted at a time.
+
+> ⚠️ **Measure the remote line to ground before wiring anything.** If it sits above
+> 3.3 V (many units pull up to 5 V), do **not** connect ESP32 pins to it directly —
+> a pin in INPUT mode would be over-spec and its clamp diode would conduct. Put a
+> 2N7000 in each leg instead: gate ← GPIO, drain → resistor → line, source → GND.
+> The ESP32 then never touches the line.
+
+### Default mapping
+
+| iDrive input | Head unit function |
+|---|---|
+| Knob CW / CCW | Volume up / down (one step **per detent**) |
+| Knob press | Mute |
+| Right / Left | Next / Previous track |
+
+Unmapped and free for future use: UP, DOWN, MENU, BACK, OPTION, COM, MEDIA, NAV, MAP.
+
+### Resistor values
+
+Taken from PAC's proven set (47/100/150/560/1000/1500/3900 Ω), skipping the low end
+where the ESP32's ~30 Ω output-LOW impedance is a large error term — at 560 Ω and up
+it is under 6%. Adjacent values are separated by ≥1.4×, wider than any radio's
+detection window.
+
+If the CP-71W has an SWC **"study" / "learn"** screen, the exact values don't matter —
+teach it whatever the sketch outputs. If it expects a fixed factory ladder, sweep:
+hand-tie single resistors from the line to ground and watch what the radio does, then
+put the values that hit into `SWC_MAP[]`. Measure each leg pin-to-GND with a DMM while
+that pin is driven LOW and record the real number.
+
+### Tuning
+
+`SWC_HOLD_MS` (140) + `SWC_GAP_MS` (60) gives a **200 ms cadence**, so a 10-detent
+spin takes ~2 s to play out — the queue absorbs it, but volume visibly lags a fast
+spin. Shortening both is the first thing to tune on the bench; how far you can go
+depends on how often the radio samples its remote input. If it turns out the CP-71W
+**auto-repeats** volume while a button is held, a better approach is to assert and
+*hold* during sustained rotation rather than emitting discrete presses.
+
+### Adding your own output
+
+All input events flow through `onButtonPress()`, which is the integration point.
+`count` is >1 only for knob rotation, where one CAN frame can carry several detents:
 
 ```cpp
-void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b) {
-  Serial.printf("PRESS: %s\n", name);
+void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
+                   uint8_t count = 1) {
   flashLED(r, g, b);
-
-  if (strcmp(name, "KNOB_CW") == 0)  { /* volume up   */ }
-  if (strcmp(name, "KNOB_CCW") == 0) { /* volume down */ }
-  if (strcmp(name, "MENU") == 0)     { /* menu        */ }
-  if (strcmp(name, "BACK") == 0)     { /* back        */ }
-  // ... etc
+  if (!strcmp(name, "KNOB_CW")) swcPush(SWC_VOL_UP, count);
+  // ... your output here
 }
 ```
 
-### SWC Voltage Output (for aftermarket head units)
-
-Wire an RC filter on GPIO2:
-```
-GPIO2 → [10kΩ] → SWC wire on head unit harness
-                      |
-                   [10µF]
-                      |
-                     GND
-```
-
-Then add PWM output:
-```cpp
-#define SWC_PIN  2
-#define PWM_FREQ 5000
-#define PWM_RES  8
-
-void outputSWC(uint8_t duty, int holdMs = 150) {
-  ledcWrite(SWC_PIN, duty);
-  delay(holdMs);
-  ledcWrite(SWC_PIN, 0);
-}
-
-// In setup():
-ledcAttach(SWC_PIN, PWM_FREQ, PWM_RES);
-ledcWrite(SWC_PIN, 0);
-```
+Build with `SWC_ENABLE 0` for CAN decode only, with no ladder output.
 
 ---
 
@@ -164,6 +208,13 @@ The iDrive requires several CAN frames to wake up and activate all inputs:
 | Directional pad needs knob wake on bench | Expected to work without in car |
 
 The definitive fix for auto-wake requires sniffing `0x5E7` and `0x273` on a running BMW F-Series to capture the exact reply format the iDrive expects.
+
+**Capture path:** the 2014 428i (F32) is the same iDrive generation as this controller.
+Use the `sniff` command in [canclaude](https://github.com/pelosim) (local tool at
+`~/Desktop/Claude/OBD and CAN Tool`) — its changed-bytes highlighter is built for
+exactly this. Caveat: F-series route the iDrive on K-CAN2 behind the ZGW gateway, so
+the OBD-II port exposes only diagnostic CAN. Expect to tap at a module connector
+(head unit or ZGW) rather than at the OBD port.
 
 ---
 
