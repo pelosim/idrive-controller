@@ -1,0 +1,15 @@
+# ── Espressif boards on this Pi ──────────────────────────────────────
+# ModemManager probes any new ttyACM with AT commands hunting for a
+# cellular modem. On an ESP32 that sprays garbage at the board as it
+# enumerates and can hijack the port mid-flash. Ignore all of VID 303a.
+ACTION=="add|change", SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
+
+# Stable per-board names. The ESP32-S3 reports its MAC as the USB serial,
+# so each board gets its own symlink — matching on VID alone would race
+# as soon as a second ESP32 is plugged in.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="D0:CF:13:24:DB:B8", SYMLINK+="idrive", MODE="0666"
+
+# Lighting controller — uncomment and confirm the serial once it is
+# plugged in (expected to equal its ESP-NOW MAC 3C:DC:75:40:0B:F0):
+#SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="3C:DC:75:40:0B:F0", SYMLINK+="lighting", MODE="0666"
