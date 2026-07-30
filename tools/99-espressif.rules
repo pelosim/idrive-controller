@@ -5,11 +5,11 @@
 ACTION=="add|change", SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
 ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
 
-# Stable per-board names. The ESP32-S3 reports its MAC as the USB serial,
-# so each board gets its own symlink — matching on VID alone would race
-# as soon as a second ESP32 is plugged in.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="D0:CF:13:24:DB:B8", SYMLINK+="idrive", MODE="0666"
-
-# Lighting controller — uncomment and confirm the serial once it is
-# plugged in (expected to equal its ESP-NOW MAC 3C:DC:75:40:0B:F0):
-#SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="3C:DC:75:40:0B:F0", SYMLINK+="lighting", MODE="0666"
+# Stable per-board names. The ESP32-S3 reports its MAC as the USB serial.
+# Matching on vendor alone races: adding the hub already reshuffled ttyACM
+# numbering once, and the two gauge panels are near-sequential MACs from the
+# same batch — only the full serial tells them apart.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="D0:CF:13:24:DB:B8", SYMLINK+="idrive",           MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="3C:DC:75:40:0B:F0", SYMLINK+="lighting",         MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="68:EE:8F:48:19:9C", SYMLINK+="gauges1 gauges",   MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="68:EE:8F:48:18:D4", SYMLINK+="gauges2",          MODE="0666"

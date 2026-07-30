@@ -11,7 +11,8 @@
 #
 #   ./tools/flash-via-pi.sh idrive     iDrive controller
 #   ./tools/flash-via-pi.sh lighting   interior lighting output board
-#   ./tools/flash-via-pi.sh gauges     aux gauge panel (board #1)
+#   ./tools/flash-via-pi.sh gauges1    aux gauge panel A / master
+#   ./tools/flash-via-pi.sh gauges2    panel B / slave — no sketch yet
 #   ./tools/flash-via-pi.sh            lists targets
 #
 # ── BOARD TABLE — edit here to add a board ─────────────────────────
@@ -47,8 +48,9 @@ board_config() {
       REPO="$CLAUDE_DIR/Automotive-Lighting-Controller"; SKETCH="firmware/pwm_controller"
       TOOLCHAIN="$HOME/.arduino-cli-esp32v2"; PORT="/dev/lighting"
       FQBN="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app" ;;
-    gauges)
-      # LilyGo T-Display-S3-Long, board #1 (MAC 68:EE:8F:48:19:9C).
+    gauges1|gauges)
+      # LilyGo T-Display-S3-Long panel A / master, board #1
+      # (MAC 68:EE:8F:48:19:9C). Owns the ADS1115 and the ESP-NOW TX.
       # Settings taken from the project's own flash.sh / BUILD.md — note the
       # partition scheme differs from every other board here, and LVGL needs
       # the include-simple flag or the build fails on lvgl.h resolution.
@@ -57,13 +59,30 @@ board_config() {
       FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,CDCOnBoot=cdc,USBMode=hwcdc,PartitionScheme=app3M_fat9M_16MB"
       EXTRA_PROPS=(--build-property "compiler.c.extra_flags=-DLV_LVGL_H_INCLUDE_SIMPLE"
                    --build-property "compiler.cpp.extra_flags=-DLV_LVGL_H_INCLUDE_SIMPLE") ;;
+    gauges2)
+      # Panel B / slave, board #2 (MAC 68:EE:8F:48:18:D4) — AFR + battery,
+      # no sensors of its own, everything arrives over ESP-NOW.
+      #
+      # DELIBERATELY NOT FLASHABLE YET. slave_app.h is an app layer meant to
+      # be dropped into a copy of LilyGo's lvgl_demo; that sketch has not
+      # been assembled. Pointing this at gauge_bench would flash the master's
+      # ADS1115 readout onto a board with no ADS1115 attached.
+      echo "gauges2 has no sketch yet — slave_app.h still needs assembling" >&2
+      echo "  into a gauges_slave sketch (see 944_gauges/CLAUDE.md)." >&2
+      return 1 ;;
     *) return 1 ;;
   esac
 }
 
+KNOWN_TARGETS="idrive lighting gauges gauges1 gauges2"
 TARGET="${1:-}"
 if [ -z "$TARGET" ] || ! board_config "$TARGET"; then
-  echo "usage: $(basename "$0") <idrive|lighting|gauges>" >&2
+  # A known-but-unbuildable target has already explained itself; only an
+  # unrecognised name needs the usage line.
+  case " $KNOWN_TARGETS " in
+    *" $TARGET "*) exit 1 ;;
+  esac
+  echo "usage: $(basename "$0") <idrive|lighting|gauges1|gauges2>" >&2
   [ -n "$TARGET" ] && echo "  unknown target: $TARGET" >&2
   exit 1
 fi
