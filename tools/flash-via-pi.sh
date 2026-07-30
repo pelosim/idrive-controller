@@ -1,51 +1,83 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════
-# Flash the iDrive controller without touching the car.
+# Flash any of the car's ESP32 boards without touching the car.
 #
-# Compiles on this Mac, copies the app binary to the Pi, and flashes the
-# ESP32 over the Pi's USB. The ESP32-S3's USB-Serial/JTAG is a ROM
-# peripheral rather than something the sketch provides, so esptool can
-# force download mode even if the firmware currently on the board crashes
-# on boot — you cannot lock yourself out remotely the way you can with a
-# board that uses a separate USB-UART bridge.
+# Compiles on this Mac, copies the app binary to the Pi, and flashes over
+# the Pi's USB. The ESP32-S3's USB-Serial/JTAG is a ROM peripheral rather
+# than something the sketch provides, so esptool can force download mode
+# even if the firmware currently on the board crashes on boot — you
+# cannot lock yourself out remotely the way you can with a board that
+# uses a separate USB-UART bridge.
 #
-#   ./tools/flash-via-pi.sh              flash idrive_controller
-#   ./tools/flash-via-pi.sh ir_capture   flash a different sketch
+#   ./tools/flash-via-pi.sh idrive     iDrive controller
+#   ./tools/flash-via-pi.sh lighting   interior lighting output board
+#   ./tools/flash-via-pi.sh            lists targets
 #
-# ONE-TIME SETUP ON THE PI (already done):
-#   pip install esptool --break-system-packages
-#   /etc/udev/rules.d/99-espressif.rules  — keeps ModemManager away from
-#   the board and provides the stable /dev/idrive symlink.
+# ── BOARD TABLE — edit here to add a board ─────────────────────────
+# Each row is: repo-relative-to-~/Desktop/Claude | sketch dir | toolchain
+# | FQBN | /dev symlink. The toolchains are deliberately separate: the
+# lighting firmware uses ledcSetup/ledcAttachPin and the old ESP-NOW
+# callback signature, both of which core 3.x removed, so it must build
+# against 2.0.14. Flashing it with the v3 toolchain fails to compile.
 #
-# Only the app partition is written (0x10000). The bootloader and
-# partition table do not change between builds. If you ever change the
-# partition scheme, do one full flash over local USB first.
+# ONE-TIME PI SETUP (done): pip install esptool --break-system-packages,
+# and /etc/udev/rules.d/99-espressif.rules for the stable symlinks —
+# every board is pinned by its MAC, because adding the USB hub already
+# reshuffled ttyACM numbering once.
+#
+# Only the app partition is written (0x10000). Bootloader and partition
+# table do not change between builds. If you ever change the partition
+# scheme, do one full flash over local USB first.
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SKETCH="${1:-idrive_controller}"
+CLAUDE_DIR="${CLAUDE_DIR:-$HOME/Desktop/Claude}"
 PI="${PI_HOST:-pi944}"
-PORT="${ESP_PORT:-/dev/idrive}"
-FQBN="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi"
 APP_OFFSET="0x10000"
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+board_config() {
+  case "$1" in
+    idrive)
+      REPO="$CLAUDE_DIR/idrive-controller"; SKETCH="idrive_controller"
+      TOOLCHAIN="$HOME/.arduino-cli-esp32v3"; PORT="/dev/idrive"
+      FQBN="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" ;;
+    lighting)
+      REPO="$CLAUDE_DIR/Automotive-Lighting-Controller"; SKETCH="firmware/pwm_controller"
+      TOOLCHAIN="$HOME/.arduino-cli-esp32v2"; PORT="/dev/lighting"
+      FQBN="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app" ;;
+    *) return 1 ;;
+  esac
+}
+
+TARGET="${1:-}"
+if [ -z "$TARGET" ] || ! board_config "$TARGET"; then
+  echo "usage: $(basename "$0") <idrive|lighting>" >&2
+  [ -n "$TARGET" ] && echo "  unknown target: $TARGET" >&2
+  exit 1
+fi
+
+BIN_NAME="$(basename "$SKETCH")"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "$BUILD"' EXIT
 
-export ARDUINO_DIRECTORIES_DATA="$HOME/.arduino-cli-esp32v3/data"
-export ARDUINO_DIRECTORIES_USER="$HOME/.arduino-cli-esp32v3/user"
-export ARDUINO_DIRECTORIES_DOWNLOADS="$HOME/.arduino-cli-esp32v3/downloads"
+export ARDUINO_DIRECTORIES_DATA="$TOOLCHAIN/data"
+export ARDUINO_DIRECTORIES_USER="$TOOLCHAIN/user"
+export ARDUINO_DIRECTORIES_DOWNLOADS="$TOOLCHAIN/downloads"
 
 [ -d "$REPO/$SKETCH" ] || { echo "no such sketch: $REPO/$SKETCH" >&2; exit 1; }
 
-echo "── compiling $SKETCH ─────────────────────────────────────"
+echo "── $TARGET ────────────────────────────────────────────────"
+echo "   sketch    $SKETCH"
+echo "   toolchain $(basename "$TOOLCHAIN")"
+echo "   port      $PORT"
+echo
+echo "── compiling ─────────────────────────────────────────────"
 arduino-cli compile --warnings all --fqbn "$FQBN" \
   --output-dir "$BUILD" "$REPO/$SKETCH" 2>&1 \
   | grep -E "Sketch uses|Global variables|error|warning:" \
   | grep -v "libraries/" || true
 
-BIN="$BUILD/$SKETCH.ino.bin"
+BIN="$BUILD/$BIN_NAME.ino.bin"
 [ -f "$BIN" ] || { echo "compile produced no binary — aborting" >&2; exit 1; }
 echo "   binary: $(du -h "$BIN" | cut -f1)"
 
@@ -56,23 +88,42 @@ if ! ssh -4 -o ConnectTimeout=10 "$PI" "test -e $PORT"; then
 
    $PORT not present on $PI.
 
-   The ESP32 is not plugged into the Pi's USB, or it has not enumerated.
-   Check with:  ssh $PI 'ls -l /dev/ttyACM* /dev/idrive'
+   Either the board is unplugged, or its udev rule is missing. Check with:
+     ssh $PI 'ls -l /dev/ttyACM* /dev/idrive /dev/lighting /dev/gauges'
 
-   Note this is the USB cable, not the 3-wire UART link — the UART
-   carries data but cannot flash.
+   Every board is pinned by MAC in /etc/udev/rules.d/99-espressif.rules —
+   a new board needs a row there before it gets a stable name.
 EOF
   exit 1
 fi
 
-echo
-echo "── uploading + flashing ──────────────────────────────────"
-scp -q -4 "$BIN" "$PI:/tmp/$SKETCH.bin"
-ssh -4 "$PI" "python3 -m esptool --chip esp32s3 --port $PORT --baud 921600 \
-  write-flash $APP_OFFSET /tmp/$SKETCH.bin && rm -f /tmp/$SKETCH.bin" \
-  2>&1 | grep -viE "^esptool|^$" | tail -14
+# The HVAC backend holds /dev/lighting (and would hold any other board it
+# talks to) the moment udev creates the symlink. esptool and a reader on the
+# same character device fight, and the flash dies partway with "No more data
+# to read from the serial port" — leaving a half-written app partition.
+# Release the port for the duration, then put it back.
+HELD_BY_BACKEND=0
+if ssh -4 "$PI" "sudo fuser $PORT 2>/dev/null | grep -q ." ; then
+  echo
+  echo "── $PORT is open by the backend — stopping it for the flash ──"
+  ssh -4 "$PI" "sudo systemctl stop hvac-backend" && HELD_BY_BACKEND=1
+  sleep 1
+fi
+restore_backend() {
+  if [ "$HELD_BY_BACKEND" = "1" ]; then
+    echo "── restarting hvac-backend ───────────────────────────────"
+    ssh -4 "$PI" "sudo systemctl start hvac-backend" || \
+      echo "   !! backend did NOT restart — start it by hand" >&2
+  fi
+}
+trap 'restore_backend; rm -rf "$BUILD"' EXIT
 
 echo
-echo "✓ $SKETCH flashed to the board on $PI"
-echo "  The ESP32 has rebooted. If the backend was mid-read on the UART it"
-echo "  will simply see the link go quiet and resume — no restart needed."
+echo "── uploading + flashing ──────────────────────────────────"
+scp -q -4 "$BIN" "$PI:/tmp/$BIN_NAME.bin"
+ssh -4 "$PI" "python3 -m esptool --chip esp32s3 --port $PORT --baud 921600 \
+  write-flash $APP_OFFSET /tmp/$BIN_NAME.bin && rm -f /tmp/$BIN_NAME.bin" \
+  2>&1 | grep -viE "^esptool|^$" | tail -12
+
+echo
+echo "✓ $TARGET flashed on $PI — the board has rebooted."
