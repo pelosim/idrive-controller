@@ -23,8 +23,8 @@ static std::vector<std::string> ledFlashes;   // "R,G,B"
 // ── Verbatim from the sketch ─────────────────────────────────────
 #define MODE_TIMEOUT_MS 10000
 enum : uint8_t { KEY_VOL_UP = 0, KEY_VOL_DOWN, KEY_MUTE, KEY_NEXT, KEY_PREV, KEY_COUNT };
-enum : uint8_t { MODE_MEDIA = 0, MODE_HVAC, MODE_LIGHT, MODE_GAUGE, MODE_COUNT };
-static const char* MODE_NAME[MODE_COUNT] = { "MEDIA", "HVAC", "LIGHT", "GAUGE" };
+enum : uint8_t { MODE_RADIO = 0, MODE_HVAC, MODE_ILLUM, MODE_GAUGE, MODE_COUNT };
+static const char* MODE_NAME[MODE_COUNT] = { "RADIO", "HVAC", "ILLUM", "GAUGE" };
 static const uint8_t MODE_RGB[MODE_COUNT][3] = {
   { 0x2C, 0xE8, 0xD8 }, { 0xFF, 0xB0, 0x00 },
   { 0x9C, 0x40, 0xFF }, { 0x5C, 0xB8, 0xFF },
@@ -56,7 +56,7 @@ static const ModeMap MODE_MAP[MODE_COUNT] = {
   { ACT_LIGHT_BRIGHTER, ACT_LIGHT_DIMMER, ACT_LIGHT_TOGGLE, ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_NONE, ACT_NONE },
   { ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN, ACT_GAUGE_SELECT, ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_NONE, ACT_NONE },
 };
-static uint8_t  activeMode    = MODE_MEDIA;
+static uint8_t  activeMode    = MODE_RADIO;
 static uint32_t modeTouchedAt = 0;
 
 static void outPush(uint8_t key, uint8_t times) { irCalls.push_back({key, times}); }
@@ -76,8 +76,8 @@ static void modeSet(uint8_t m) {
   flashLED(MODE_RGB[m][0], MODE_RGB[m][1], MODE_RGB[m][2]);
 }
 static void modeService() {
-  if (activeMode == MODE_MEDIA) return;
-  if ((int32_t)(millis() - (modeTouchedAt + MODE_TIMEOUT_MS)) >= 0) modeSet(MODE_MEDIA);
+  if (activeMode == MODE_RADIO) return;
+  if ((int32_t)(millis() - (modeTouchedAt + MODE_TIMEOUT_MS)) >= 0) modeSet(MODE_RADIO);
 }
 static void dispatchAction(uint8_t act, uint8_t count) {
   if (act == ACT_NONE || act >= ACT_COUNT) return;
@@ -86,11 +86,12 @@ static void dispatchAction(uint8_t act, uint8_t count) {
   else                                       linkEmit(ACT_NAME[act], count);
 }
 static void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b, uint8_t count = 1) {
-  if      (!strcmp(name, "MEDIA")) { modeSet(MODE_MEDIA); return; }
-  else if (!strcmp(name, "NAV"))   { modeSet(MODE_HVAC);  return; }
-  else if (!strcmp(name, "MAP"))   { modeSet(MODE_LIGHT); return; }
-  else if (!strcmp(name, "MENU"))  { modeSet(MODE_GAUGE); return; }
-  else if (!strcmp(name, "BACK"))  { modeSet(MODE_MEDIA); return; }
+  static const struct { const char* button; uint8_t mode; } MODE_BUTTONS[] = {
+    { "MEDIA", MODE_RADIO }, { "MENU", MODE_HVAC }, { "MAP", MODE_ILLUM },
+    { "NAV", MODE_GAUGE }, { "BACK", MODE_RADIO },
+  };
+  for (const auto& mb : MODE_BUTTONS)
+    if (!strcmp(name, mb.button)) { modeSet(mb.mode); return; }
   flashLED(r, g, b);
   const ModeMap& mm = MODE_MAP[activeMode];
   uint8_t act = ACT_NONE;
@@ -113,7 +114,7 @@ static void check(bool ok, const char* what) {
 }
 static void reset() {
   irCalls.clear(); linkCalls.clear(); ledFlashes.clear();
-  activeMode = MODE_MEDIA; modeTouchedAt = 0; g_now = 0;
+  activeMode = MODE_RADIO; modeTouchedAt = 0; g_now = 0;
 }
 static void advance(uint32_t ms) { for (uint32_t i = 0; i < ms; i++) { g_now++; modeService(); } }
 
@@ -132,10 +133,10 @@ int main() {
   check(ok, "volume/mute/track still go straight to IR, detent count preserved");
   check(linkCalls.empty(), "MEDIA mode emits nothing on the link");
 
-  printf("\nTest 2: NAV switches to HVAC and re-targets the knob\n");
+  printf("\nTest 2: MENU switches to HVAC and re-targets the knob\n");
   reset();
-  onButtonPress("NAV", 0,0,0);
-  check(activeMode == MODE_HVAC, "NAV selects HVAC");
+  onButtonPress("MENU", 0,0,0);
+  check(activeMode == MODE_HVAC, "MENU selects HVAC");
   onButtonPress("KNOB_CW", 0,255,0, 2);
   onButtonPress("UP", 0,255,255);
   ok = linkCalls.size() == 3
@@ -155,41 +156,41 @@ int main() {
 
   printf("\nTest 4: auto-revert to MEDIA after idle\n");
   reset();
-  onButtonPress("NAV", 0,0,0);
+  onButtonPress("MENU", 0,0,0);
   advance(MODE_TIMEOUT_MS - 100);
   check(activeMode == MODE_HVAC, "still HVAC just before the timeout");
   advance(200);
-  check(activeMode == MODE_MEDIA, "reverted to MEDIA after the timeout");
+  check(activeMode == MODE_RADIO, "reverted to MEDIA after the timeout");
 
   printf("\nTest 5: activity keeps a mode alive\n");
   reset();
-  onButtonPress("NAV", 0,0,0);
+  onButtonPress("MENU", 0,0,0);
   for (int i = 0; i < 5; i++) { advance(MODE_TIMEOUT_MS - 500); onButtonPress("KNOB_CW", 0,0,0, 1); }
   check(activeMode == MODE_HVAC, "repeated use prevents the revert");
   advance(MODE_TIMEOUT_MS + 100);
-  check(activeMode == MODE_MEDIA, "and it still reverts once activity stops");
+  check(activeMode == MODE_RADIO, "and it still reverts once activity stops");
 
   printf("\nTest 6: MEDIA never times out\n");
   reset();
   advance(MODE_TIMEOUT_MS * 5);
-  check(activeMode == MODE_MEDIA, "MEDIA is the resting state, no revert churn");
+  check(activeMode == MODE_RADIO, "MEDIA is the resting state, no revert churn");
   check(linkCalls.empty(), "idle MEDIA emits nothing");
 
   printf("\nTest 7: BACK is the panic button from any mode\n");
   reset();
-  for (uint8_t m : {MODE_HVAC, MODE_LIGHT, MODE_GAUGE}) {
+  for (uint8_t m : {MODE_HVAC, MODE_ILLUM, MODE_GAUGE}) {
     activeMode = m;
     onButtonPress("BACK", 0,0,0);
-    if (activeMode != MODE_MEDIA) { check(false, "BACK returned to MEDIA"); break; }
+    if (activeMode != MODE_RADIO) { check(false, "BACK returned to MEDIA"); break; }
   }
-  check(activeMode == MODE_MEDIA, "BACK returns to MEDIA from every mode");
+  check(activeMode == MODE_RADIO, "BACK returns to MEDIA from every mode");
 
   printf("\nTest 8: every mode change flashes its signature colour\n");
   reset();
-  onButtonPress("NAV", 0,0,0);
+  onButtonPress("MENU", 0,0,0);
   bool sawAmber = false;
   for (auto& f : ledFlashes) if (f == "255,176,0") sawAmber = true;
-  check(sawAmber, "HVAC flashes amber (255,176,0)");
+  check(sawAmber, "HVAC (MENU) flashes amber (255,176,0)");
   reset();
   onButtonPress("MAP", 0,0,0);
   bool sawViolet = false;
@@ -207,7 +208,7 @@ int main() {
 
   printf("\nTest 10: no action is reachable from the wrong mode\n");
   reset();
-  onButtonPress("MENU", 0,0,0);             // GAUGE
+  onButtonPress("NAV", 0,0,0);              // GAUGE
   onButtonPress("KNOB_CW", 0,0,0, 1);
   bool leaked = false;
   for (auto& c : linkCalls)

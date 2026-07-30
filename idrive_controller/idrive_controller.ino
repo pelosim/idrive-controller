@@ -229,9 +229,9 @@ static const char* KEY_NAME[KEY_COUNT] __attribute__((unused)) = {
 
 #define MODE_TIMEOUT_MS 10000   // idle revert to MEDIA
 
-enum : uint8_t { MODE_MEDIA = 0, MODE_HVAC, MODE_LIGHT, MODE_GAUGE, MODE_COUNT };
+enum : uint8_t { MODE_RADIO = 0, MODE_HVAC, MODE_ILLUM, MODE_GAUGE, MODE_COUNT };
 
-static const char* MODE_NAME[MODE_COUNT] = { "MEDIA", "HVAC", "LIGHT", "GAUGE" };
+static const char* MODE_NAME[MODE_COUNT] = { "RADIO", "HVAC", "ILLUM", "GAUGE" };
 
 // Signature colours. HVAC/LIGHT borrow the 944S VFD dash palette so the
 // controller reads as part of the same system: amber = heat, ice blue.
@@ -273,17 +273,52 @@ static const char* ACT_NAME[ACT_COUNT] = {
 struct ModeMap { uint8_t knobCW, knobCCW, knobPress, left, right, up, down; };
 
 static const ModeMap MODE_MAP[MODE_COUNT] = {
-  /* MEDIA */ { ACT_VOL_UP,         ACT_VOL_DOWN,        ACT_MUTE,
+  /* RADIO */ { ACT_VOL_UP,         ACT_VOL_DOWN,        ACT_MUTE,
                 ACT_PREV,           ACT_NEXT,            ACT_NONE,          ACT_NONE },
   /* HVAC  */ { ACT_TEMP_UP,        ACT_TEMP_DOWN,       ACT_HVAC_TOGGLE,
                 ACT_HVAC_MODE_PREV, ACT_HVAC_MODE_NEXT,  ACT_FAN_UP,        ACT_FAN_DOWN },
-  /* LIGHT */ { ACT_LIGHT_BRIGHTER, ACT_LIGHT_DIMMER,    ACT_LIGHT_TOGGLE,
+  /* ILLUM */ { ACT_LIGHT_BRIGHTER, ACT_LIGHT_DIMMER,    ACT_LIGHT_TOGGLE,
                 ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_NONE,       ACT_NONE },
   /* GAUGE */ { ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN, ACT_GAUGE_SELECT,
                 ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_NONE,         ACT_NONE },
 };
 
-static uint8_t  activeMode    = MODE_MEDIA;
+// ═══════════════════════════════════════════════════════════════════
+// BUTTON MAP — the one place to remap the controller
+// ═══════════════════════════════════════════════════════════════════
+// Which physical iDrive button selects which mode. Edit freely. The only
+// rule worth keeping is that BACK stays pointed at your default mode, so
+// there is always one button that gets you home without looking.
+//
+// MENU is the large top-centre button and the easiest to find by feel,
+// so it gets HVAC — the mode most likely to be wanted while driving.
+//
+//   button   mode     rationale
+//   ------   -----    ------------------------------------------------
+//   MEDIA    RADIO    printed label matches: volume / mute / track
+//   MENU     HVAC     top centre, easiest reach, most used
+//   MAP      ILLUM    interior illumination
+//   NAV      GAUGE    gauge-panel paging
+//   BACK     RADIO    always returns home
+//
+// Unassigned and free for future use: COM.
+static const struct { const char* button; uint8_t mode; } MODE_BUTTONS[] = {
+  { "MEDIA", MODE_RADIO },
+  { "MENU",  MODE_HVAC  },
+  { "MAP",   MODE_ILLUM },
+  { "NAV",   MODE_GAUGE },
+  { "BACK",  MODE_RADIO },
+};
+
+// Buttons that fire an action directly from ANY mode, bypassing the mode
+// map. Add a row here for anything you want on a single press regardless
+// of what the knob is currently bound to.
+static const struct { const char* button; uint8_t action; uint8_t r, g, b; }
+GLOBAL_BUTTONS[] = {
+  { "OPTION", ACT_AUX_SWAP, 0x5C, 0xB8, 0xFF },  // round screen: clock <-> G-meter
+};
+
+static uint8_t  activeMode    = MODE_RADIO;
 static uint32_t modeTouchedAt = 0;
 
 // ═══════════════════════════════════════════════════════════════════
@@ -647,10 +682,10 @@ static void modeSet(uint8_t m) {
 // Auto-revert to MEDIA so the knob is never unexpectedly wired to
 // something else. Called every loop.
 static void modeService() {
-  if (activeMode == MODE_MEDIA) return;
+  if (activeMode == MODE_RADIO) return;
   if ((int32_t)(millis() - (modeTouchedAt + MODE_TIMEOUT_MS)) >= 0) {
     Serial.println("MODE timeout — reverting to MEDIA");
-    modeSet(MODE_MEDIA);
+    modeSet(MODE_RADIO);
   }
 }
 
@@ -677,23 +712,18 @@ void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b,
   if (count > 1) Serial.printf("PRESS: %s x%u\n", name, count);
   else           Serial.printf("PRESS: %s\n", name);
 
-  // ── Mode selection — these never produce an action ────────────
-  // BACK is the panic button: always returns to volume control.
-  if      (!strcmp(name, "MEDIA")) { modeSet(MODE_MEDIA); return; }
-  else if (!strcmp(name, "NAV"))   { modeSet(MODE_HVAC);  return; }
-  else if (!strcmp(name, "MAP"))   { modeSet(MODE_LIGHT); return; }
-  else if (!strcmp(name, "MENU"))  { modeSet(MODE_GAUGE); return; }
-  else if (!strcmp(name, "BACK"))  { modeSet(MODE_MEDIA); return; }
+  // ── Mode selection — driven entirely by MODE_BUTTONS above ────
+  // These never produce an action; they only re-point the knob.
+  for (const auto& mb : MODE_BUTTONS)
+    if (!strcmp(name, mb.button)) { modeSet(mb.mode); return; }
 
-  // ── Global actions — work from ANY mode ───────────────────────
-  // Swapping the round aux screen between the Sport Chrono clock and the
-  // G-meter is a thing you want on one press regardless of what the knob
-  // is currently bound to, so it deliberately bypasses the mode map.
-  if (!strcmp(name, "OPTION")) {
-    flashLED(0x5C, 0xB8, 0xFF);      // ice blue, matches the aux screen
-    dispatchAction(ACT_AUX_SWAP, 1);
-    return;
-  }
+  // ── Global actions — driven by GLOBAL_BUTTONS, any mode ───────
+  for (const auto& gb : GLOBAL_BUTTONS)
+    if (!strcmp(name, gb.button)) {
+      flashLED(gb.r, gb.g, gb.b);
+      dispatchAction(gb.action, 1);
+      return;
+    }
 
   flashLED(r, g, b);
 
@@ -1028,7 +1058,14 @@ void setup() {
 #endif
   Serial.printf("MODE: %s  (auto-revert after %ums idle)\n",
                 MODE_NAME[activeMode], (unsigned)MODE_TIMEOUT_MS);
-  Serial.println("  MEDIA=media  NAV=hvac  MAP=light  MENU=gauge  BACK=media");
+  // Print the live map rather than a hardcoded string, so the banner can
+  // never drift from MODE_BUTTONS the way the old one did.
+  Serial.print("  ");
+  for (const auto& mb : MODE_BUTTONS)
+    Serial.printf("%s=%s  ", mb.button, MODE_NAME[mb.mode]);
+  for (const auto& gb : GLOBAL_BUTTONS)
+    Serial.printf("%s=%s  ", gb.button, ACT_NAME[gb.action]);
+  Serial.println();
 
   modeTouchedAt = millis();
   Serial.println("Waiting for 0x5E7 init handshake...");
