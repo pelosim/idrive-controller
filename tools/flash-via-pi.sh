@@ -11,6 +11,7 @@
 #
 #   ./tools/flash-via-pi.sh idrive     iDrive controller
 #   ./tools/flash-via-pi.sh lighting   interior lighting output board
+#   ./tools/flash-via-pi.sh gauges     aux gauge panel (board #1)
 #   ./tools/flash-via-pi.sh            lists targets
 #
 # ── BOARD TABLE — edit here to add a board ─────────────────────────
@@ -62,7 +63,7 @@ board_config() {
 
 TARGET="${1:-}"
 if [ -z "$TARGET" ] || ! board_config "$TARGET"; then
-  echo "usage: $(basename "$0") <idrive|lighting>" >&2
+  echo "usage: $(basename "$0") <idrive|lighting|gauges>" >&2
   [ -n "$TARGET" ] && echo "  unknown target: $TARGET" >&2
   exit 1
 fi
