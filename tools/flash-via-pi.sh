@@ -36,6 +36,7 @@ PI="${PI_HOST:-pi944}"
 APP_OFFSET="0x10000"
 
 board_config() {
+  EXTRA_PROPS=()          # per-board extra --build-property args
   case "$1" in
     idrive)
       REPO="$CLAUDE_DIR/idrive-controller"; SKETCH="idrive_controller"
@@ -45,6 +46,16 @@ board_config() {
       REPO="$CLAUDE_DIR/Automotive-Lighting-Controller"; SKETCH="firmware/pwm_controller"
       TOOLCHAIN="$HOME/.arduino-cli-esp32v2"; PORT="/dev/lighting"
       FQBN="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app" ;;
+    gauges)
+      # LilyGo T-Display-S3-Long, board #1 (MAC 68:EE:8F:48:19:9C).
+      # Settings taken from the project's own flash.sh / BUILD.md — note the
+      # partition scheme differs from every other board here, and LVGL needs
+      # the include-simple flag or the build fails on lvgl.h resolution.
+      REPO="$CLAUDE_DIR/944_gauges"; SKETCH="build/gauge_bench"
+      TOOLCHAIN="$HOME/.arduino-cli-esp32v2"; PORT="/dev/gauges"
+      FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,CDCOnBoot=cdc,USBMode=hwcdc,PartitionScheme=app3M_fat9M_16MB"
+      EXTRA_PROPS=(--build-property "compiler.c.extra_flags=-DLV_LVGL_H_INCLUDE_SIMPLE"
+                   --build-property "compiler.cpp.extra_flags=-DLV_LVGL_H_INCLUDE_SIMPLE") ;;
     *) return 1 ;;
   esac
 }
@@ -73,6 +84,7 @@ echo "   port      $PORT"
 echo
 echo "── compiling ─────────────────────────────────────────────"
 arduino-cli compile --warnings all --fqbn "$FQBN" \
+  "${EXTRA_PROPS[@]}" \
   --output-dir "$BUILD" "$REPO/$SKETCH" 2>&1 \
   | grep -E "Sketch uses|Global variables|error|warning:" \
   | grep -v "libraries/" || true
