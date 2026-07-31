@@ -16,27 +16,28 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="68:EE:8F:48:18:D4", S
 
 # ── TSDash bridge ────────────────────────────────────────────────────
 # The odd one out. We reach this board through its UART port, so the Pi
-# sees the CH340/CP2102 bridge chip (ttyUSB*, VID 1a86 or 10c4) — NOT the
-# ESP32 (VID 303a, ttyACM*) like every board above. Its native USB port is
-# plugged into the TSDash Pi and never appears here at all.
+# sees the CH340 bridge chip (ttyUSB*, 1a86:7522) — NOT the ESP32
+# (303a, ttyACM*) like every board above. Its native port is plugged into
+# the TSDash Pi and never appears here at all.
 #
-# SETTLED 2026-07-31: this board's bridge chip is a CH340 (1a86:7522) and
-# it reports NO serial number at all — the USB descriptor has no serial
-# field, checked on the Mac. So the by-serial form every rule above uses is
-# not available here, and pinning has to be by physical port instead.
+# This CH340 reports NO serial number (checked 2026-07-31), so it cannot
+# be pinned by serial the way every other board here is. It is pinned to a
+# physical hub port instead: /dev/tsdash follows the SOCKET, not the board.
+# LABEL THAT SOCKET — move the cable and the symlink moves with the port.
 #
-# Uncomment the line below with the real path filled in. Read it ON THE PI,
-# with the board in the hub port you intend to keep it in:
-#     udevadm info -a -n /dev/ttyUSB0 | grep -m1 'KERNELS=="[0-9]'
+# The firmware reports its MAC in every status line and the backend checks
+# it against TSDASH_MAC, so a moved cable becomes a log line rather than
+# keystrokes going somewhere unintended.
 #
-# Then put a tape label on that socket. Unlike every other board here, the
-# name now follows the SOCKET, not the board — move the cable to a
-# different hub port and /dev/tsdash moves with the port, not with the
-# bridge. That is the tradeoff for a chip with no identity of its own.
-#SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", KERNELS=="1-1.4", SYMLINK+="tsdash", MODE="0666"
+# ⚠ If /dev/tsdash never appears but a "944S Dash Bridge" keyboard shows up
+#   in `lsusb` on THIS Pi, the two USB-C cables are swapped at the board:
+#   the native (HID) port is here instead of on the TSDash Pi. Swap them at
+#   the board end. Happened on first install — the bridge was a live
+#   sysrq-capable keyboard on the climate-control Pi, and every keystroke
+#   would have gone to the wrong machine while looking like a dead link.
 #
-# ModemManager probes new ttyUSB devices exactly like it probes ttyACM, and
-# the same garbage-during-enumeration problem applies. These cover both
-# common bridge chips and are safe to leave in place either way.
+# KERNELS below is this Pi's hub socket, read with:
+#   udevadm info -a -n /dev/ttyUSB0 | grep -m1 'KERNELS=="[0-9]'
 ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
 ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", KERNELS=="1-1.4", SYMLINK+="tsdash", MODE="0666"
