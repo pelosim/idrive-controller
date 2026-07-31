@@ -70,7 +70,12 @@
 //   D PING        no keystroke — liveness check
 //   D GET         no keystroke — status report
 //
-//   {"src":"dash","ok":1,"cmd":"NEXT","q":1,"sent":12,"usb":1}
+//   {"src":"dash","ok":1,"cmd":"NEXT","q":1,"sent":12,"drop":0,
+//    "init":1,"usb":1,"mac":"3C:DC:75:40:0B:D8"}
+//
+//   init  did tinyusb_init() succeed at boot — a firmware/build answer
+//   usb   has a host actually enumerated us — a cable/port/host answer
+//   mac   which board this is; udev cannot pin it, so it says so itself
 //
 // One keystroke per command, never a burst. The knob clamps rotation to
 // 1..12 detents per frame and a flick that fires eight Ctrl+Rights leaves
@@ -128,9 +133,16 @@ static SendState sendState = S_IDLE;
 static unsigned long stateAt = 0;
 static Stroke   inFlight = { 0, 0 };
 
-static volatile bool usbUp    = false;   // host enumerated, not suspended
 static uint32_t      sentCount = 0;      // keystrokes actually pushed to HID
 static uint32_t      dropCount = 0;      // queue-full drops
+
+// Result of tinyusb_init() at boot. Queryable, not just printed once: a
+// banner is a race you lose every time the board resets while nothing is
+// reading. "init":0 means the USB stack never came up (a firmware or build
+// problem); "init":1 with "usb":0 means the stack is fine and no host has
+// enumerated us (a cable, port, or host problem). Those need different
+// fixes and the board is the only thing that can tell them apart.
+static bool usbStarted = false;
 
 // ── Who am I ───────────────────────────────────────────────────────
 // Every other board on the Pi's hub is pinned by udev on its MAC, which
@@ -179,8 +191,9 @@ static void ledService() {
   // Dim heartbeat so a headless board on a hub still proves it is alive.
   if (!ledOffAt && (now - lastBeat) >= HEARTBEAT_MS) {
     lastBeat = now;
-    ledSet(0, usbUp ? 6 : 0, usbUp ? 6 : 0, 60);
-    if (!usbUp) ledSet(6, 2, 0, 60);   // amber tick = no USB host yet
+    bool up = usbMounted();
+    ledSet(0, up ? 6 : 0, up ? 6 : 0, 60);
+    if (!up) ledSet(6, 2, 0, 60);   // amber tick = no USB host yet
   }
 #endif
 }
@@ -230,10 +243,10 @@ static void sendService() {
 // ── Status ─────────────────────────────────────────────────────────
 static void report(const char* cmd, bool ok) {
   LINK.printf("{\"src\":\"dash\",\"ok\":%d,\"cmd\":\"%s\",\"q\":%u,"
-              "\"sent\":%lu,\"drop\":%lu,\"usb\":%d,\"mac\":\"%s\"}\n",
+              "\"sent\":%lu,\"drop\":%lu,\"init\":%d,\"usb\":%d,\"mac\":\"%s\"}\n",
               ok ? 1 : 0, cmd, (unsigned)qCount,
               (unsigned long)sentCount, (unsigned long)dropCount,
-              usbUp ? 1 : 0, macStr);
+              usbStarted ? 1 : 0, usbMounted() ? 1 : 0, macStr);
 }
 
 // ── Command handling ───────────────────────────────────────────────
@@ -283,20 +296,16 @@ static void handleLine(char* line) {
 }
 
 // ── USB host state ─────────────────────────────────────────────────
-// Informational only. Sends are attempted regardless of what this says:
-// if the event plumbing is ever wrong, a working bridge that reports the
-// wrong flag beats a silent bridge that refuses to type.
-static void onUsbEvent(void* arg, esp_event_base_t base,
-                       int32_t id, void* data) {
-  if (base != ARDUINO_USB_EVENTS) return;
-  switch (id) {
-    case ARDUINO_USB_STARTED_EVENT:
-    case ARDUINO_USB_RESUME_EVENT:  usbUp = true;  break;
-    case ARDUINO_USB_STOPPED_EVENT:
-    case ARDUINO_USB_SUSPEND_EVENT: usbUp = false; break;
-    default: break;
-  }
-}
+// ESPUSB::operator bool() is `_started && tinyusb_device_mounted`, which
+// is the authoritative answer to "has a host actually enumerated me" —
+// straight from the stack rather than inferred from events. An earlier
+// version tracked ARDUINO_USB_STARTED/SUSPEND instead and read 0 in every
+// state, which is worse than useless on a board whose whole job is to be
+// a USB device: it cannot tell a dead cable from a dead flag.
+//
+// Informational only. Sends are attempted regardless: a working bridge
+// that reports the wrong flag beats a silent one that refuses to type.
+static inline bool usbMounted() { return (bool)USB; }
 
 // ═══════════════════════════════════════════════════════════════════
 void setup() {
@@ -309,15 +318,18 @@ void setup() {
   led.show();
 #endif
 
-  USB.onEvent(onUsbEvent);
   USB.productName("944S Dash Bridge");
   USB.manufacturerName("944S");
   Keyboard.begin();
-  USB.begin();
+  // Return value is load-bearing: if tinyusb_init() fails the board looks
+  // identical to one on a charge-only cable — alive on UART, invisible to
+  // the host. Say which it is rather than leaving it to be guessed at.
+  usbStarted = USB.begin();
 
   readMac();
   LINK.printf("\ndash_bridge %s — HVAC Pi -> TSDash Pi HID bridge\n", FW_VERSION);
   LINK.printf("mac %s (not in the CH340's USB descriptor — see readMac)\n", macStr);
+  LINK.printf("USB stack %s\n", usbStarted ? "started" : "FAILED (tinyusb_init)");
   LINK.println("commands: D NEXT | D PREV | D CFG | D HOME | D PING | D GET");
   ledSet(0, 40, 36, 400);
 }
