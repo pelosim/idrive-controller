@@ -181,11 +181,19 @@ the same knob and d-pad depending on mode, and every labelled button now selects
 | MAP | ILLUM | the ESP-NOW lighting controller |
 | NAV | GAUGE | backup gauge cluster (T-Display panels) — no Pi protocol yet |
 | OPTION | TSDASH | TunerStudio dash on the TSDash Pi, via the dash_bridge board |
-| BACK | RADIO | always returns home |
+| BACK | — | global: SYSTEM_TOGGLE, the link status page on the HVAC screen |
 | COM | — | global: AUX_SWAP, round screen clock ↔ G-meter |
 
 GAUGE and TSDASH are two different screens and deliberately two different modes.
 Nothing is unassigned now; UP and DOWN remain free *within* individual modes.
+
+BACK stopped being a second way home in 1.8.0 — MEDIA carries the printed label for
+the default mode and gets there just as fast, so one button doing it is enough.
+
+The firmware also emits a liveness heartbeat every 2 s: `{"hb":1,"mode":...,"up":...}`.
+Deliberately a different shape from an event so the Pi can drop it before the action
+path. Without it the Pi cannot tell an idle knob from a cut UART, which would make
+any link-health display lie.
 
 ### Resistor values
 

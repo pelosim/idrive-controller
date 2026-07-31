@@ -1,8 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════
 // BMW F-Series iDrive — Universal CAN Input Controller
 // Hardware: Lonely Binary ESP32-S3 + SN65HVD230 CAN transceiver
-// Version:  1.7.0  — TSDASH mode on OPTION; AUX_SWAP moved to COM
-//                    (header was stale at 1.3.0 through tags v1.4.0-v1.6.0)
+// Version:  1.8.0  — BACK selects the SYSTEM STATUS screen; link heartbeat
 // Author:   Mark Pelosi
 // License:  MIT
 // Repo:     https://github.com/pelosim/idrive-controller
@@ -270,6 +269,7 @@ enum : uint8_t {
   ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_GAUGE_SELECT,
   ACT_TSDASH_NEXT, ACT_TSDASH_PREV, ACT_TSDASH_CFG, ACT_TSDASH_HOME,
   ACT_AUX_SWAP,           // global: round screen clock <-> g-meter
+  ACT_SYSTEM_TOGGLE,      // global: HVAC screen <-> system status page
   ACT_COUNT
 };
 
@@ -283,7 +283,7 @@ static const char* ACT_NAME[ACT_COUNT] = {
   "GAUGE_SCROLL_UP", "GAUGE_SCROLL_DOWN",
   "GAUGE_PAGE_PREV", "GAUGE_PAGE_NEXT", "GAUGE_SELECT",
   "TSDASH_NEXT", "TSDASH_PREV", "TSDASH_CFG", "TSDASH_HOME",
-  "AUX_SWAP",
+  "AUX_SWAP", "SYSTEM_TOGGLE",
 };
 
 // What each physical input does in each mode.
@@ -323,17 +323,18 @@ static const ModeMap MODE_MAP[MODE_COUNT] = {
 //   MAP      ILLUM    interior illumination
 //   NAV      GAUGE    backup gauge cluster (T-Display panels)
 //   OPTION   TSDASH   TunerStudio dash on the TSDash Pi
-//   BACK     RADIO    always returns home
 //
-// Nothing is unassigned now. AUX_SWAP moved off OPTION to COM when TSDASH
-// took this button — see GLOBAL_BUTTONS below.
+// BACK used to be a second way home. The owner does not need it — MEDIA is
+// the printed label for the default mode and reaches it just as fast — so
+// BACK now opens the SYSTEM STATUS page instead (see GLOBAL_BUTTONS).
+// The one rule worth keeping is that MEDIA still gets you home without
+// looking; it is simply the only button that does.
 static const struct { const char* button; uint8_t mode; } MODE_BUTTONS[] = {
   { "MEDIA",  MODE_RADIO  },
   { "MENU",   MODE_HVAC   },
   { "MAP",    MODE_ILLUM  },
   { "NAV",    MODE_GAUGE  },
   { "OPTION", MODE_TSDASH },
-  { "BACK",   MODE_RADIO  },
 };
 
 // Buttons that fire an action directly from ANY mode, bypassing the mode
@@ -344,11 +345,16 @@ GLOBAL_BUTTONS[] = {
   // Was OPTION until TSDASH claimed that button. COM was the only free
   // input left, and this is the least-used of the two functions — a
   // one-shot toggle rather than something you sit and operate.
-  { "COM", ACT_AUX_SWAP, 0x5C, 0xB8, 0xFF },     // round screen: clock <-> G-meter
+  { "COM",  ACT_AUX_SWAP,      0x5C, 0xB8, 0xFF },  // round screen: clock <-> G-meter
+  // Global rather than a mode: the status page is read-only, so the knob
+  // keeps doing whatever it was doing while you look at it. Press again
+  // to dismiss — one button in, same button out.
+  { "BACK", ACT_SYSTEM_TOGGLE, 0xFF, 0xFF, 0xFF },  // system status page
 };
 
 static uint8_t  activeMode    = MODE_RADIO;
 static uint32_t modeTouchedAt = 0;
+static uint32_t lastHeartbeat = 0;
 
 // ═══════════════════════════════════════════════════════════════════
 // LINK — structured output for everything that is not the head unit
@@ -362,6 +368,13 @@ static uint32_t modeTouchedAt = 0;
 // both worse, and USB CDC on this board is also the programming port.
 // Set LINK_UART 0 to emit only to the USB console.
 // ═══════════════════════════════════════════════════════════════════
+
+// Heartbeat cadence. The Pi cannot otherwise tell an idle knob from a dead
+// UART: idrive_last_s only moves when someone touches the controller, so a
+// status page built on it would show green straight through a cut wire.
+// This is the only thing that makes "the link is up" an answerable question.
+// Cheap — one buffered UART write every 2 s, nothing blocking.
+#define LINK_HB_MS    2000
 
 #define LINK_UART     1        // 1 = also write NDJSON to the hardware UART
 #define LINK_BAUD     115200
@@ -693,6 +706,22 @@ static void linkEmit(const char* action, uint8_t count) {
   LinkSerial.write((const uint8_t*)buf, n);
 #endif
   Serial.printf("   -> %s", buf);   // human echo on the USB console
+}
+
+// Liveness only. Deliberately a DIFFERENT shape from an event — the Pi keys
+// on "hb" and drops it before the action path, so a heartbeat can never be
+// mistaken for input and leave the on-screen knob mirror permanently awake.
+// No console echo: this fires forever and would bury real events.
+static void linkHeartbeat() {
+  char buf[96];
+  int n = snprintf(buf, sizeof buf,
+                   "{\"hb\":1,\"mode\":\"%s\",\"up\":%lu}\n",
+                   MODE_NAME[activeMode], (unsigned long)(millis() / 1000));
+  if (n <= 0) return;
+  if (n > (int)sizeof buf) n = sizeof buf - 1;
+#if LINK_UART
+  LinkSerial.write((const uint8_t*)buf, n);
+#endif
 }
 
 // ── Mode switching ────────────────────────────────────────────────
@@ -1115,6 +1144,11 @@ void loop() {
   twai_message_t msg;
   if (twai_receive(&msg, pdMS_TO_TICKS(10)) == ESP_OK) {
     handleFrame(msg);
+  }
+
+  if (millis() - lastHeartbeat >= LINK_HB_MS) {
+    linkHeartbeat();
+    lastHeartbeat = millis();
   }
 
   modeService();  // revert to MEDIA after an idle period

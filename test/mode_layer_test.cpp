@@ -42,6 +42,7 @@ enum : uint8_t {
   ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN,
   ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_GAUGE_SELECT,
   ACT_TSDASH_NEXT, ACT_TSDASH_PREV, ACT_TSDASH_CFG, ACT_TSDASH_HOME,
+  ACT_AUX_SWAP, ACT_SYSTEM_TOGGLE,
   ACT_COUNT
 };
 static const char* ACT_NAME[ACT_COUNT] = {
@@ -53,6 +54,7 @@ static const char* ACT_NAME[ACT_COUNT] = {
   "GAUGE_SCROLL_UP", "GAUGE_SCROLL_DOWN",
   "GAUGE_PAGE_PREV", "GAUGE_PAGE_NEXT", "GAUGE_SELECT",
   "TSDASH_NEXT", "TSDASH_PREV", "TSDASH_CFG", "TSDASH_HOME",
+  "AUX_SWAP", "SYSTEM_TOGGLE",
 };
 struct ModeMap { uint8_t knobCW, knobCCW, knobPress, left, right, up, down; };
 static const ModeMap MODE_MAP[MODE_COUNT] = {
@@ -94,10 +96,15 @@ static void dispatchAction(uint8_t act, uint8_t count) {
 static void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b, uint8_t count = 1) {
   static const struct { const char* button; uint8_t mode; } MODE_BUTTONS[] = {
     { "MEDIA", MODE_RADIO }, { "MENU", MODE_HVAC }, { "MAP", MODE_ILLUM },
-    { "NAV", MODE_GAUGE }, { "OPTION", MODE_TSDASH }, { "BACK", MODE_RADIO },
+    { "NAV", MODE_GAUGE }, { "OPTION", MODE_TSDASH },
   };
   for (const auto& mb : MODE_BUTTONS)
     if (!strcmp(name, mb.button)) { modeSet(mb.mode); return; }
+  static const struct { const char* button; uint8_t action; } GLOBAL_BUTTONS[] = {
+    { "COM", ACT_AUX_SWAP }, { "BACK", ACT_SYSTEM_TOGGLE },
+  };
+  for (const auto& gb : GLOBAL_BUTTONS)
+    if (!strcmp(name, gb.button)) { flashLED(r,g,b); dispatchAction(gb.action, 1); return; }
   flashLED(r, g, b);
   const ModeMap& mm = MODE_MAP[activeMode];
   uint8_t act = ACT_NONE;
@@ -154,10 +161,10 @@ int main() {
 
   printf("\nTest 3: mode-select buttons never leak an action\n");
   reset();
-  for (const char* n : {"MEDIA","NAV","MAP","MENU","BACK"}) onButtonPress(n, 0,0,0);
+  for (const char* n : {"MEDIA","NAV","MAP","MENU","OPTION"}) onButtonPress(n, 0,0,0);
   bool onlyEnters = true;
   for (auto& c : linkCalls) if (c.action != "MODE_ENTER") onlyEnters = false;
-  check(onlyEnters, "MEDIA/NAV/MAP/MENU/BACK produce only MODE_ENTER");
+  check(onlyEnters, "MEDIA/NAV/MAP/MENU/OPTION produce only MODE_ENTER");
   check(irCalls.empty(), "and never an IR send");
 
   printf("\nTest 4: auto-revert to MEDIA after idle\n");
@@ -182,14 +189,19 @@ int main() {
   check(activeMode == MODE_RADIO, "MEDIA is the resting state, no revert churn");
   check(linkCalls.empty(), "idle MEDIA emits nothing");
 
-  printf("\nTest 7: BACK is the panic button from any mode\n");
+  printf("\nTest 7: MEDIA is the way home from any mode\n");
+  // Was "BACK is the panic button". BACK became the SYSTEM STATUS toggle in
+  // 1.8.0 at the owner's request — MEDIA carries the printed label for the
+  // default mode and reaches it just as fast, so the second way home was
+  // redundant. The property still worth guaranteeing is that ONE button gets
+  // you to volume without looking, so that is what this now asserts.
   reset();
-  for (uint8_t m : {MODE_HVAC, MODE_ILLUM, MODE_GAUGE}) {
+  for (uint8_t m : {MODE_HVAC, MODE_ILLUM, MODE_GAUGE, MODE_TSDASH}) {
     activeMode = m;
-    onButtonPress("BACK", 0,0,0);
-    if (activeMode != MODE_RADIO) { check(false, "BACK returned to MEDIA"); break; }
+    onButtonPress("MEDIA", 0,0,0);
+    if (activeMode != MODE_RADIO) { check(false, "MEDIA returned to RADIO"); break; }
   }
-  check(activeMode == MODE_RADIO, "BACK returns to MEDIA from every mode");
+  check(activeMode == MODE_RADIO, "MEDIA returns to RADIO from every mode");
 
   printf("\nTest 8: every mode change flashes its signature colour\n");
   reset();
@@ -271,6 +283,31 @@ int main() {
   for (auto& c : linkCalls)
     if (c.action.rfind("TSDASH_", 0) == 0) tsdashLeak = true;
   check(!tsdashLeak, "GAUGE mode cannot emit TSDASH actions");
+
+  printf("\nTest 13: BACK is a global SYSTEM_TOGGLE, not a mode\n");
+  for (uint8_t m : { MODE_RADIO, MODE_HVAC, MODE_ILLUM, MODE_GAUGE, MODE_TSDASH }) {
+    reset();
+    modeSet(m);
+    uint8_t before = activeMode;
+    linkCalls.clear();
+    onButtonPress("BACK", 0,0,0);
+    bool one = linkCalls.size() == 1 && linkCalls[0].action == "SYSTEM_TOGGLE";
+    check(one && activeMode == before,
+          "BACK toggles system status and leaves the mode alone");
+  }
+  reset();
+  onButtonPress("BACK", 0,0,0);
+  check(irCalls.empty(), "BACK never emits IR, even from RADIO");
+
+  printf("\nTest 14: COM still reaches AUX_SWAP from every mode\n");
+  for (uint8_t m : { MODE_RADIO, MODE_HVAC, MODE_ILLUM, MODE_GAUGE, MODE_TSDASH }) {
+    reset();
+    modeSet(m);
+    linkCalls.clear();
+    onButtonPress("COM", 0,0,0);
+    check(linkCalls.size() == 1 && linkCalls[0].action == "AUX_SWAP",
+          "COM emits AUX_SWAP regardless of mode");
+  }
 
   printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL TESTS PASSED",
          failures, failures == 1 ? "" : "s");

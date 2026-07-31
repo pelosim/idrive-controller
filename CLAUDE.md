@@ -157,5 +157,8 @@ touchscreen updates for free and there is no second state path.
   `sniff`. F-series put the iDrive on K-CAN2 behind the ZGW, so tap a module
   connector, not the OBD port.
 - All labelled buttons are now assigned (see README's mode table). OPTION selects
-  TSDASH; AUX_SWAP moved to COM to make room. UP/DOWN are still free within
-  RADIO, ILLUM and GAUGE.
+  TSDASH; AUX_SWAP moved to COM to make room; BACK became the global SYSTEM_TOGGLE
+  in 1.8.0 and no longer returns home. UP/DOWN are still free within RADIO, ILLUM,
+  GAUGE and TSDASH.
+- The 2 s `hb` heartbeat on the link is load-bearing for the Pi's status page: it is
+  the only thing that distinguishes an idle knob from a dead UART.
