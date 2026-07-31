@@ -103,8 +103,12 @@ echo "   toolchain $(basename "$TOOLCHAIN")"
 echo "   port      $PORT"
 echo
 echo "── compiling ─────────────────────────────────────────────"
+# ${EXTRA_PROPS[@]+...} rather than a bare ${EXTRA_PROPS[@]}: macOS still
+# ships bash 3.2, where expanding an EMPTY array under `set -u` is itself an
+# unbound-variable error. Every board without extra build properties — idrive
+# included — aborted at "compile produced no binary" because of it.
 arduino-cli compile --warnings all --fqbn "$FQBN" \
-  "${EXTRA_PROPS[@]}" \
+  ${EXTRA_PROPS[@]+"${EXTRA_PROPS[@]}"} \
   --output-dir "$BUILD" "$REPO/$SKETCH" 2>&1 \
   | grep -E "Sketch uses|Global variables|error|warning:" \
   | grep -v "libraries/" || true
