@@ -13,3 +13,29 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="D0:CF:13:24:DB:B8", S
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="3C:DC:75:40:0B:F0", SYMLINK+="lighting",         MODE="0666"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="68:EE:8F:48:19:9C", SYMLINK+="gauges1 gauges",   MODE="0666"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="68:EE:8F:48:18:D4", SYMLINK+="gauges2",          MODE="0666"
+
+# ── TSDash bridge ────────────────────────────────────────────────────
+# The odd one out. We reach this board through its UART port, so the Pi
+# sees the CH340/CP2102 bridge chip (ttyUSB*, VID 1a86 or 10c4) — NOT the
+# ESP32 (VID 303a, ttyACM*) like every board above. Its native USB port is
+# plugged into the TSDash Pi and never appears here at all.
+#
+# Fill in ONE of the two lines below and delete the other.
+#
+# 1. Bridge chip HAS a serial number (most CP2102, some CH340). Read it:
+#       udevadm info -a -n /dev/ttyUSB0 | grep -m1 '{serial}'
+#    then put that value here — same shape as the rules above.
+#SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{serial}=="XXXXXXXX", SYMLINK+="tsdash", MODE="0666"
+#
+# 2. Bridge chip has NO serial — common on cheap CH340s, which report an
+#    identical descriptor on every unit. Pin it to a physical hub port
+#    instead and put a tape label on that port, because the name now
+#    follows the socket rather than the board. Find the path with:
+#       udevadm info -a -n /dev/ttyUSB0 | grep -m1 'KERNELS=="[0-9]'
+#SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", KERNELS=="1-1.4", SYMLINK+="tsdash", MODE="0666"
+#
+# ModemManager probes new ttyUSB devices exactly like it probes ttyACM, and
+# the same garbage-during-enumeration problem applies. These cover both
+# common bridge chips and are safe to leave in place either way.
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
