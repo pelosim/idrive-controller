@@ -171,7 +171,21 @@ one leg is ever asserted at a time.
 | Knob press | Mute |
 | Right / Left | Next / Previous track |
 
-Unmapped and free for future use: UP, DOWN, MENU, BACK, OPTION, COM, MEDIA, NAV, MAP.
+This table is the head-unit layer only. The mode layer added since then re-targets
+the same knob and d-pad depending on mode, and every labelled button now selects one:
+
+| Button | Mode | Drives |
+|---|---|---|
+| MEDIA | RADIO | head unit over IR (the mapping above) |
+| MENU | HVAC | the Pi climate control |
+| MAP | ILLUM | the ESP-NOW lighting controller |
+| NAV | GAUGE | backup gauge cluster (T-Display panels) — no Pi protocol yet |
+| OPTION | TSDASH | TunerStudio dash on the TSDash Pi, via the dash_bridge board |
+| BACK | RADIO | always returns home |
+| COM | — | global: AUX_SWAP, round screen clock ↔ G-meter |
+
+GAUGE and TSDASH are two different screens and deliberately two different modes.
+Nothing is unassigned now; UP and DOWN remain free *within* individual modes.
 
 ### Resistor values
 

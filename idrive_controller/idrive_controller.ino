@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════════════════
 // BMW F-Series iDrive — Universal CAN Input Controller
 // Hardware: Lonely Binary ESP32-S3 + SN65HVD230 CAN transceiver
-// Version:  1.3.0  — IN-CAR BUILD (bench diagnostics off)
+// Version:  1.7.0  — TSDASH mode on OPTION; AUX_SWAP moved to COM
+//                    (header was stale at 1.3.0 through tags v1.4.0-v1.6.0)
 // Author:   Mark Pelosi
 // License:  MIT
 // Repo:     https://github.com/pelosim/idrive-controller
@@ -212,7 +213,14 @@ static const char* KEY_NAME[KEY_COUNT] __attribute__((unused)) = {
 //   MEDIA  head unit over IR   (the v1.3.0 behaviour, unchanged)
 //   HVAC   the Pi climate control
 //   LIGHT  the ESP-NOW lighting controller
-//   GAUGE  the T-Display gauge panels
+//   GAUGE  the T-Display gauge panels      (backup cluster)
+//   TSDASH the TunerStudio dash on the TSDash Pi
+//
+// GAUGE and TSDASH are two different screens and deliberately two
+// different modes: GAUGE is the backup cluster built from the
+// T-Display-S3-Long panels, TSDASH is the TunerStudio Pi. They share no
+// transport — GAUGE goes to the Pi as an action nothing consumes yet,
+// TSDASH becomes HID keystrokes on the dash_bridge board.
 //
 // Two rules keep it from becoming a foot-gun:
 //   * The NeoPixel flashes a signature colour on every mode change, so
@@ -229,17 +237,24 @@ static const char* KEY_NAME[KEY_COUNT] __attribute__((unused)) = {
 
 #define MODE_TIMEOUT_MS 10000   // idle revert to MEDIA
 
-enum : uint8_t { MODE_RADIO = 0, MODE_HVAC, MODE_ILLUM, MODE_GAUGE, MODE_COUNT };
+enum : uint8_t { MODE_RADIO = 0, MODE_HVAC, MODE_ILLUM, MODE_GAUGE,
+                 MODE_TSDASH, MODE_COUNT };
 
-static const char* MODE_NAME[MODE_COUNT] = { "RADIO", "HVAC", "ILLUM", "GAUGE" };
+static const char* MODE_NAME[MODE_COUNT] =
+  { "RADIO", "HVAC", "ILLUM", "GAUGE", "TSDASH" };
 
 // Signature colours. HVAC/LIGHT borrow the 944S VFD dash palette so the
 // controller reads as part of the same system: amber = heat, ice blue.
+//
+// TSDASH is deliberately NOT another shade of blue. It is the mode most
+// easily confused with GAUGE — both page a gauge screen — and telling
+// them apart at a glance while driving is the entire job of this LED.
 static const uint8_t MODE_RGB[MODE_COUNT][3] = {
-  { 0x2C, 0xE8, 0xD8 },   // MEDIA — phosphor teal
-  { 0xFF, 0xB0, 0x00 },   // HVAC  — amber
-  { 0x9C, 0x40, 0xFF },   // LIGHT — violet
-  { 0x5C, 0xB8, 0xFF },   // GAUGE — ice blue
+  { 0x2C, 0xE8, 0xD8 },   // MEDIA  — phosphor teal
+  { 0xFF, 0xB0, 0x00 },   // HVAC   — amber
+  { 0x9C, 0x40, 0xFF },   // LIGHT  — violet
+  { 0x5C, 0xB8, 0xFF },   // GAUGE  — ice blue
+  { 0x3A, 0xFF, 0x8C },   // TSDASH — spring green
 };
 
 // Actions. The five MEDIA actions MUST stay first and in KEY_* order —
@@ -253,6 +268,7 @@ enum : uint8_t {
   ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_LIGHT_TOGGLE,
   ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN,
   ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_GAUGE_SELECT,
+  ACT_TSDASH_NEXT, ACT_TSDASH_PREV, ACT_TSDASH_CFG, ACT_TSDASH_HOME,
   ACT_AUX_SWAP,           // global: round screen clock <-> g-meter
   ACT_COUNT
 };
@@ -266,6 +282,7 @@ static const char* ACT_NAME[ACT_COUNT] = {
   "LIGHT_SCENE_PREV", "LIGHT_SCENE_NEXT", "LIGHT_TOGGLE",
   "GAUGE_SCROLL_UP", "GAUGE_SCROLL_DOWN",
   "GAUGE_PAGE_PREV", "GAUGE_PAGE_NEXT", "GAUGE_SELECT",
+  "TSDASH_NEXT", "TSDASH_PREV", "TSDASH_CFG", "TSDASH_HOME",
   "AUX_SWAP",
 };
 
@@ -281,6 +298,12 @@ static const ModeMap MODE_MAP[MODE_COUNT] = {
                 ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_NONE,       ACT_NONE },
   /* GAUGE */ { ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN, ACT_GAUGE_SELECT,
                 ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_NONE,         ACT_NONE },
+  // TSDASH tilt matches the keystroke it produces: up is Ctrl+Up, down is
+  // Ctrl+Down. Worth keeping if these are ever remapped — the gesture and
+  // the shortcut pointing the same way is the whole reason it is learnable
+  // without looking. Knob press repeats HOME as the get-me-back-out input.
+  /* TSDASH */{ ACT_TSDASH_NEXT,    ACT_TSDASH_PREV,      ACT_TSDASH_HOME,
+                ACT_TSDASH_PREV,    ACT_TSDASH_NEXT,      ACT_TSDASH_CFG,   ACT_TSDASH_HOME },
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -298,16 +321,19 @@ static const ModeMap MODE_MAP[MODE_COUNT] = {
 //   MEDIA    RADIO    printed label matches: volume / mute / track
 //   MENU     HVAC     top centre, easiest reach, most used
 //   MAP      ILLUM    interior illumination
-//   NAV      GAUGE    gauge-panel paging
+//   NAV      GAUGE    backup gauge cluster (T-Display panels)
+//   OPTION   TSDASH   TunerStudio dash on the TSDash Pi
 //   BACK     RADIO    always returns home
 //
-// Unassigned and free for future use: COM.
+// Nothing is unassigned now. AUX_SWAP moved off OPTION to COM when TSDASH
+// took this button — see GLOBAL_BUTTONS below.
 static const struct { const char* button; uint8_t mode; } MODE_BUTTONS[] = {
-  { "MEDIA", MODE_RADIO },
-  { "MENU",  MODE_HVAC  },
-  { "MAP",   MODE_ILLUM },
-  { "NAV",   MODE_GAUGE },
-  { "BACK",  MODE_RADIO },
+  { "MEDIA",  MODE_RADIO  },
+  { "MENU",   MODE_HVAC   },
+  { "MAP",    MODE_ILLUM  },
+  { "NAV",    MODE_GAUGE  },
+  { "OPTION", MODE_TSDASH },
+  { "BACK",   MODE_RADIO  },
 };
 
 // Buttons that fire an action directly from ANY mode, bypassing the mode
@@ -315,7 +341,10 @@ static const struct { const char* button; uint8_t mode; } MODE_BUTTONS[] = {
 // of what the knob is currently bound to.
 static const struct { const char* button; uint8_t action; uint8_t r, g, b; }
 GLOBAL_BUTTONS[] = {
-  { "OPTION", ACT_AUX_SWAP, 0x5C, 0xB8, 0xFF },  // round screen: clock <-> G-meter
+  // Was OPTION until TSDASH claimed that button. COM was the only free
+  // input left, and this is the least-used of the two functions — a
+  // one-shot toggle rather than something you sit and operate.
+  { "COM", ACT_AUX_SWAP, 0x5C, 0xB8, 0xFF },     // round screen: clock <-> G-meter
 };
 
 static uint8_t  activeMode    = MODE_RADIO;

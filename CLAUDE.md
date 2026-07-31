@@ -156,4 +156,6 @@ touchscreen updates for free and there is no second state path.
 - Solve the bench auto-wake: capture `0x5E7`/`0x273` on the 2014 428i with canclaude
   `sniff`. F-series put the iDrive on K-CAN2 behind the ZGW, so tap a module
   connector, not the OBD port.
-- Map the 9 unused inputs (UP, DOWN, MENU, BACK, OPTION, COM, MEDIA, NAV, MAP).
+- All labelled buttons are now assigned (see README's mode table). OPTION selects
+  TSDASH; AUX_SWAP moved to COM to make room. UP/DOWN are still free within
+  RADIO, ILLUM and GAUGE.

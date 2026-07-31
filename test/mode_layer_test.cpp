@@ -23,11 +23,14 @@ static std::vector<std::string> ledFlashes;   // "R,G,B"
 // ── Verbatim from the sketch ─────────────────────────────────────
 #define MODE_TIMEOUT_MS 10000
 enum : uint8_t { KEY_VOL_UP = 0, KEY_VOL_DOWN, KEY_MUTE, KEY_NEXT, KEY_PREV, KEY_COUNT };
-enum : uint8_t { MODE_RADIO = 0, MODE_HVAC, MODE_ILLUM, MODE_GAUGE, MODE_COUNT };
-static const char* MODE_NAME[MODE_COUNT] = { "RADIO", "HVAC", "ILLUM", "GAUGE" };
+enum : uint8_t { MODE_RADIO = 0, MODE_HVAC, MODE_ILLUM, MODE_GAUGE,
+                 MODE_TSDASH, MODE_COUNT };
+static const char* MODE_NAME[MODE_COUNT] =
+  { "RADIO", "HVAC", "ILLUM", "GAUGE", "TSDASH" };
 static const uint8_t MODE_RGB[MODE_COUNT][3] = {
   { 0x2C, 0xE8, 0xD8 }, { 0xFF, 0xB0, 0x00 },
   { 0x9C, 0x40, 0xFF }, { 0x5C, 0xB8, 0xFF },
+  { 0x3A, 0xFF, 0x8C },
 };
 enum : uint8_t {
   ACT_NONE = 0,
@@ -38,6 +41,7 @@ enum : uint8_t {
   ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_LIGHT_TOGGLE,
   ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN,
   ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_GAUGE_SELECT,
+  ACT_TSDASH_NEXT, ACT_TSDASH_PREV, ACT_TSDASH_CFG, ACT_TSDASH_HOME,
   ACT_COUNT
 };
 static const char* ACT_NAME[ACT_COUNT] = {
@@ -48,6 +52,7 @@ static const char* ACT_NAME[ACT_COUNT] = {
   "LIGHT_SCENE_PREV", "LIGHT_SCENE_NEXT", "LIGHT_TOGGLE",
   "GAUGE_SCROLL_UP", "GAUGE_SCROLL_DOWN",
   "GAUGE_PAGE_PREV", "GAUGE_PAGE_NEXT", "GAUGE_SELECT",
+  "TSDASH_NEXT", "TSDASH_PREV", "TSDASH_CFG", "TSDASH_HOME",
 };
 struct ModeMap { uint8_t knobCW, knobCCW, knobPress, left, right, up, down; };
 static const ModeMap MODE_MAP[MODE_COUNT] = {
@@ -55,6 +60,7 @@ static const ModeMap MODE_MAP[MODE_COUNT] = {
   { ACT_TEMP_UP, ACT_TEMP_DOWN, ACT_HVAC_TOGGLE, ACT_HVAC_MODE_PREV, ACT_HVAC_MODE_NEXT, ACT_FAN_UP, ACT_FAN_DOWN },
   { ACT_LIGHT_BRIGHTER, ACT_LIGHT_DIMMER, ACT_LIGHT_TOGGLE, ACT_LIGHT_SCENE_PREV, ACT_LIGHT_SCENE_NEXT, ACT_NONE, ACT_NONE },
   { ACT_GAUGE_SCROLL_UP, ACT_GAUGE_SCROLL_DOWN, ACT_GAUGE_SELECT, ACT_GAUGE_PAGE_PREV, ACT_GAUGE_PAGE_NEXT, ACT_NONE, ACT_NONE },
+  { ACT_TSDASH_NEXT, ACT_TSDASH_PREV, ACT_TSDASH_HOME, ACT_TSDASH_PREV, ACT_TSDASH_NEXT, ACT_TSDASH_CFG, ACT_TSDASH_HOME },
 };
 static uint8_t  activeMode    = MODE_RADIO;
 static uint32_t modeTouchedAt = 0;
@@ -88,7 +94,7 @@ static void dispatchAction(uint8_t act, uint8_t count) {
 static void onButtonPress(const char* name, uint8_t r, uint8_t g, uint8_t b, uint8_t count = 1) {
   static const struct { const char* button; uint8_t mode; } MODE_BUTTONS[] = {
     { "MEDIA", MODE_RADIO }, { "MENU", MODE_HVAC }, { "MAP", MODE_ILLUM },
-    { "NAV", MODE_GAUGE }, { "BACK", MODE_RADIO },
+    { "NAV", MODE_GAUGE }, { "OPTION", MODE_TSDASH }, { "BACK", MODE_RADIO },
   };
   for (const auto& mb : MODE_BUTTONS)
     if (!strcmp(name, mb.button)) { modeSet(mb.mode); return; }
@@ -215,6 +221,56 @@ int main() {
     if (c.action.rfind("TEMP_", 0) == 0 || c.action.rfind("LIGHT_", 0) == 0) leaked = true;
   check(!leaked, "GAUGE mode cannot emit HVAC or LIGHT actions");
   check(irCalls.empty(), "GAUGE mode cannot emit IR");
+
+  // ── TSDASH (OPTION) ──────────────────────────────────────────────
+  // GAUGE and TSDASH page two different screens — the backup cluster and
+  // the TunerStudio Pi. Confusing them means the knob silently drives the
+  // wrong display, which is exactly the class of foot-gun this file exists
+  // to catch, so the separation is asserted in both directions.
+  printf("\nTest 11: OPTION enters TSDASH and its inputs map correctly\n");
+  reset();
+  onButtonPress("OPTION", 0,0,0);
+  check(activeMode == MODE_TSDASH, "OPTION selects TSDASH");
+  check(!ledFlashes.empty() && ledFlashes.back() == "58,255,140",
+        "TSDASH flashes spring green (58,255,140)");
+
+  reset();
+  onButtonPress("OPTION", 0,0,0);
+  onButtonPress("KNOB_CW",    0,0,0, 1);
+  onButtonPress("KNOB_CCW",   0,0,0, 1);
+  onButtonPress("UP",    0,0,0, 1);
+  onButtonPress("DOWN",  0,0,0, 1);
+  onButtonPress("KNOB_PRESS", 0,0,0, 1);
+  std::vector<std::string> got;
+  for (auto& c : linkCalls) if (c.action != "MODE_ENTER") got.push_back(c.action);
+  check(got == std::vector<std::string>{ "TSDASH_NEXT", "TSDASH_PREV",
+                                         "TSDASH_CFG", "TSDASH_HOME",
+                                         "TSDASH_HOME" },
+        "CW/CCW page, tilt up/down = CFG/HOME, press = HOME");
+  check(irCalls.empty(), "TSDASH mode cannot emit IR");
+
+  printf("\nTest 12: TSDASH and GAUGE cannot reach each other\n");
+  reset();
+  onButtonPress("OPTION", 0,0,0);           // TSDASH
+  onButtonPress("KNOB_CW",   0,0,0, 1);
+  onButtonPress("KNOB_CCW",  0,0,0, 1);
+  onButtonPress("LEFT", 0,0,0, 1);
+  onButtonPress("RIGHT",0,0,0, 1);
+  bool gaugeLeak = false;
+  for (auto& c : linkCalls)
+    if (c.action.rfind("GAUGE_", 0) == 0) gaugeLeak = true;
+  check(!gaugeLeak, "TSDASH mode cannot emit GAUGE actions");
+
+  reset();
+  onButtonPress("NAV", 0,0,0);              // GAUGE
+  onButtonPress("KNOB_CW",   0,0,0, 1);
+  onButtonPress("KNOB_CCW",  0,0,0, 1);
+  onButtonPress("LEFT", 0,0,0, 1);
+  onButtonPress("RIGHT",0,0,0, 1);
+  bool tsdashLeak = false;
+  for (auto& c : linkCalls)
+    if (c.action.rfind("TSDASH_", 0) == 0) tsdashLeak = true;
+  check(!tsdashLeak, "GAUGE mode cannot emit TSDASH actions");
 
   printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL TESTS PASSED",
          failures, failures == 1 ? "" : "s");
