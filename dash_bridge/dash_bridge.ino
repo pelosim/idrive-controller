@@ -86,8 +86,9 @@ HID is unavailable under USBMode=hwcdc (Hardware CDC and JTAG)."
 
 #include "USB.h"
 #include "USBHIDKeyboard.h"
+#include "esp_mac.h"
 
-#define FW_VERSION "1.0.0"
+#define FW_VERSION "1.1.0"
 
 // ── Tunables ───────────────────────────────────────────────────────
 #define LINK_BAUD   115200
@@ -130,6 +131,28 @@ static Stroke   inFlight = { 0, 0 };
 static volatile bool usbUp    = false;   // host enumerated, not suspended
 static uint32_t      sentCount = 0;      // keystrokes actually pushed to HID
 static uint32_t      dropCount = 0;      // queue-full drops
+
+// ── Who am I ───────────────────────────────────────────────────────
+// Every other board on the Pi's hub is pinned by udev on its MAC, which
+// the ESP32-S3 publishes as the USB serial string on its NATIVE port.
+// This board is reached over its UART port instead, where the host talks
+// to a CH340 — a separate chip with its own fixed descriptor and no idea
+// what our MAC is. udev therefore cannot pin us by MAC, and this CH340
+// reports no serial at all, so /dev/tsdash has to be pinned to a physical
+// hub port and follows the socket rather than the board.
+//
+// So we say it out loud instead. The MAC goes in the boot banner and in
+// every status line, which lets the Pi confirm it is talking to the board
+// it thinks it is — a moved cable becomes a log line instead of silent
+// keystrokes going to the wrong place.
+static char macStr[18] = "??:??:??:??:??:??";
+
+static void readMac() {
+  uint8_t m[6] = {0};
+  if (esp_read_mac(m, ESP_MAC_WIFI_STA) == ESP_OK)
+    snprintf(macStr, sizeof macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+             m[0], m[1], m[2], m[3], m[4], m[5]);
+}
 
 // ── LED ────────────────────────────────────────────────────────────
 // Colours match the car: teal for forward, amber for back, ice blue for
@@ -207,10 +230,10 @@ static void sendService() {
 // ── Status ─────────────────────────────────────────────────────────
 static void report(const char* cmd, bool ok) {
   LINK.printf("{\"src\":\"dash\",\"ok\":%d,\"cmd\":\"%s\",\"q\":%u,"
-              "\"sent\":%lu,\"drop\":%lu,\"usb\":%d}\n",
+              "\"sent\":%lu,\"drop\":%lu,\"usb\":%d,\"mac\":\"%s\"}\n",
               ok ? 1 : 0, cmd, (unsigned)qCount,
               (unsigned long)sentCount, (unsigned long)dropCount,
-              usbUp ? 1 : 0);
+              usbUp ? 1 : 0, macStr);
 }
 
 // ── Command handling ───────────────────────────────────────────────
@@ -292,7 +315,9 @@ void setup() {
   Keyboard.begin();
   USB.begin();
 
+  readMac();
   LINK.printf("\ndash_bridge %s — HVAC Pi -> TSDash Pi HID bridge\n", FW_VERSION);
+  LINK.printf("mac %s (not in the CH340's USB descriptor — see readMac)\n", macStr);
   LINK.println("commands: D NEXT | D PREV | D CFG | D HOME | D PING | D GET");
   ledSet(0, 40, 36, 400);
 }
