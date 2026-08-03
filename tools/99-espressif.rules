@@ -13,6 +13,7 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="D0:CF:13:24:DB:B8", S
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="3C:DC:75:40:0B:F0", SYMLINK+="lighting",         MODE="0666"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="68:EE:8F:48:19:9C", SYMLINK+="gauges1 gauges",   MODE="0666"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="68:EE:8F:48:18:D4", SYMLINK+="gauges2",          MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{serial}=="48:CA:43:A3:FD:8C", SYMLINK+="ignition",         MODE="0666"
 
 # ── TSDash bridge ────────────────────────────────────────────────────
 # The odd one out. We reach this board through its UART port, so the Pi

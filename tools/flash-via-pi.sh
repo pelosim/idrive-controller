@@ -10,6 +10,7 @@
 # uses a separate USB-UART bridge.
 #
 #   ./tools/flash-via-pi.sh idrive     iDrive controller
+#   ./tools/flash-via-pi.sh ignition   ACC/IGN status display
 #   ./tools/flash-via-pi.sh lighting   interior lighting output board
 #   ./tools/flash-via-pi.sh gauges1    aux gauge panel A / master
 #   ./tools/flash-via-pi.sh gauges2    panel B / slave — no sketch yet
@@ -44,6 +45,18 @@ board_config() {
       REPO="$CLAUDE_DIR/idrive-controller"; SKETCH="idrive_controller"
       TOOLCHAIN="$HOME/.arduino-cli-esp32v3"; PORT="/dev/idrive"
       FQBN="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi" ;;
+    ignition)
+      # Waveshare ESP32-S3-LCD-1.47 near the ignition switch, showing
+      # OFF/ACC/IGN from two 12V sense lines. MAC 48:CA:43:A3:FD:8C.
+      #
+      # Lives outside CLAUDE_DIR — its repo is still in ~/Downloads. Note
+      # the SMARTKNOB enumerates as the same 303a:1001 device with the same
+      # product string, so the udev rule pinning this by MAC is the only
+      # thing standing between "flash the ignition display" and "flash the
+      # smartknob". Confirm with: ssh pi944 'ls -l /dev/ignition'
+      REPO="$HOME/Downloads/944-ignition-display"; SKETCH="ignition_status_display"
+      TOOLCHAIN="$HOME/.arduino-cli-esp32v3"; PORT="/dev/ignition"
+      FQBN="esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=huge_app,CDCOnBoot=cdc,FlashSize=16M" ;;
     lighting)
       REPO="$CLAUDE_DIR/Automotive-Lighting-Controller"; SKETCH="firmware/pwm_controller"
       TOOLCHAIN="$HOME/.arduino-cli-esp32v2"; PORT="/dev/lighting"
